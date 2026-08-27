@@ -1,0 +1,76 @@
+services:
+  # ------------------------------------------------------------------ api
+  # Owns the schema and all reads/writes the UI needs. No browser in here.
+  api:
+    build:
+      context: .
+      dockerfile: docker/api.Dockerfile
+    environment:
+      DB_PATH: /data/portal.db
+      SCRAPE_BACKEND: ${SCRAPE_BACKEND:-browser}
+      SWEEP_INTERVAL_MINUTES: ${SWEEP_INTERVAL_MINUTES:-60}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      SESSION_HOURS: ${SESSION_HOURS:-8}
+      # nginx is the only ingress, so X-Forwarded-For is trustworthy here.
+      # Never set this true if the API is exposed directly.
+      TRUST_PROXY_HEADERS: "true"
+    volumes:
+      - ./data:/data
+    # Not published to the host: the only way in is through web/nginx.
+    expose:
+      - "8000"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/api/health', timeout=3).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+
+  # ------------------------------------------------------------------ web
+  # The SPA plus the reverse proxy. This is the only published port.
+  web:
+    build:
+      context: .
+      dockerfile: docker/web.Dockerfile
+    ports:
+      - "${PORT:-8080}:8080"
+    depends_on:
+      api:
+        condition: service_started
+    restart: unless-stopped
+
+  # --------------------------------------------------------------- worker
+  # Headed Chromium under Xvfb, on the sweep schedule. Claims runs the API
+  # queues in the database - it cannot be reached over the network at all.
+  worker:
+    build:
+      context: .
+      dockerfile: docker/worker.Dockerfile
+    environment:
+      DB_PATH: /data/portal.db
+      SCRAPE_BACKEND: ${SCRAPE_BACKEND:-browser}
+      SWEEP_INTERVAL_MINUTES: ${SWEEP_INTERVAL_MINUTES:-60}
+      QUEUE_POLL_SECONDS: ${QUEUE_POLL_SECONDS:-15}
+      PLAYWRIGHT_HEADLESS: "false"
+      REDDIT_CLIENT_ID: ${REDDIT_CLIENT_ID:-}
+      REDDIT_CLIENT_SECRET: ${REDDIT_CLIENT_SECRET:-}
+      REDDIT_USER_AGENT: ${REDDIT_USER_AGENT:-python:scraping-defense-lab:v0.2}
+      REDDIT_USERNAME: ${REDDIT_USERNAME:-}
+      REDDIT_PASSWORD: ${REDDIT_PASSWORD:-}
+    volumes:
+      - ./data:/data
+    depends_on:
+      api:
+        condition: service_started
+    # Chromium's default /dev/shm (64MB) is too small and it will crash on
+    # content-heavy pages. Either this or shm_size; ipc: host is what
+    # Playwright recommends.
+    ipc: host
+    restart: unless-stopped
+
+# The SQLite file lives in ./data on the host, shared by api and worker.
+# A bind mount rather than a named volume so you can back it up, copy it off,
+# or open it with sqlite3 without going through Docker. WAL mode (see db.py)
+# is what makes two containers on one file safe.

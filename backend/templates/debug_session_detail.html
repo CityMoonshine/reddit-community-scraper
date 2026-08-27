@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Debug &mdash; Session #{{ session['id'] }}</title>
+  <style>
+    body { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; margin: 0;
+           background: #14161a; color: #d8dbe0; font-size: .82rem; }
+    header { background: #1e2128; padding: .8rem 1.25rem; border-bottom: 1px solid #2c3038; }
+    header h1 { margin: 0 0 .2rem; font-size: .95rem; color: #fff; font-weight: 600; }
+    header span { color: #7d838f; font-size: .78rem; }
+    a { color: #6fb3ff; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    main { padding: 1.25rem; }
+    section { margin-bottom: 2rem; }
+    h2 { font-size: .78rem; text-transform: uppercase; letter-spacing: .05em;
+         color: #7d838f; font-weight: 500; border-bottom: 1px solid #23262d;
+         padding-bottom: .35rem; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { padding: .4rem .6rem; text-align: left; border-bottom: 1px solid #23262d;
+             vertical-align: top; }
+    th { color: #7d838f; font-weight: 500; font-size: .7rem; text-transform: uppercase; }
+    .kind { padding: .08rem .4rem; border-radius: 3px; font-size: .68rem;
+            text-transform: uppercase; letter-spacing: .04em; }
+    .kind-request  { background: #1d3a52; color: #7fc0f0; }
+    .kind-signal   { background: #4a2020; color: #f09090; }
+    .kind-behavior { background: #23402a; color: #86ce9b; }
+    .weight { color: #d9534f; font-weight: 600; }
+    .running { color: #c9a227; }
+    .detail { color: #8b919c; }
+    .kv { display: grid; grid-template-columns: 220px 1fr; gap: .2rem 1rem; }
+    .kv dt { color: #7d838f; }
+    .kv dd { margin: 0; word-break: break-all; }
+    .empty { color: #7d838f; }
+    .total { font-size: 1.1rem; color: #d9534f; font-weight: 600; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Session #{{ session['id'] }} &mdash; {{ session['username'] or 'anonymous' }}</h1>
+    <span>
+      <a href="/debug/sessions">&larr; all sessions</a> &nbsp;|&nbsp;
+      {{ session['ip_address'] }} &nbsp;|&nbsp;
+      created {{ session['created_at'] }} &nbsp;|&nbsp;
+      verdict: {{ session['verdict'] }} &nbsp;|&nbsp;
+      final score: <span class="total">{{ total_score }}</span>
+    </span>
+  </header>
+
+  <main>
+    <section>
+      <h2>Timeline</h2>
+      {% if timeline %}
+      <table>
+        <thead>
+          <tr>
+            <th style="width:170px">At</th>
+            <th style="width:90px">Kind</th>
+            <th>Event</th>
+            <th>Detail</th>
+            <th style="width:60px">Weight</th>
+            <th style="width:70px">Running</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for e in timeline %}
+          <tr>
+            <td>{{ e['at'] }}</td>
+            <td><span class="kind kind-{{ e['kind'] }}">{{ e['kind'] }}</span></td>
+            <td>{{ e['summary'] }}</td>
+            <td class="detail">{{ e['detail'] }}</td>
+            <td class="weight">{% if e['weight'] %}+{{ e['weight'] }}{% endif %}</td>
+            <td class="running">{{ e['running_score'] }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% else %}
+        <p class="empty">Nothing logged for this session yet.</p>
+      {% endif %}
+    </section>
+
+    <section>
+      <h2>Fingerprints</h2>
+      {% if fingerprints %}
+        {% for fp in fingerprints %}
+        <dl class="kv">
+          {% for key in fp.keys() %}
+            {% if key not in ['id', 'session_id', 'raw_payload'] %}
+              <dt>{{ key }}</dt>
+              <dd>{{ fp[key] if fp[key] is not none else '—' }}</dd>
+            {% endif %}
+          {% endfor %}
+        </dl>
+        {% endfor %}
+      {% else %}
+        <p class="empty">No fingerprint telemetry. Stage 3 isn't wired up yet.</p>
+      {% endif %}
+    </section>
+  </main>
+</body>
+</html>

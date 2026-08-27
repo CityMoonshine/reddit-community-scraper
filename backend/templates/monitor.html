@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Monitoring - Insights Portal</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 0; background: #f4f5f7; color: #222; }
+    header { background: #1f4e79; color: #fff; padding: .75rem 1.5rem; display: flex;
+             justify-content: space-between; align-items: center; }
+    header h1 { font-size: 1rem; margin: 0; font-weight: 600; }
+    header nav a { color: #cfe0f0; text-decoration: none; margin-right: 1rem; font-size: .87rem; }
+    header nav a.active { color: #fff; font-weight: 600; }
+    header button { background: transparent; border: 1px solid rgba(255,255,255,.5);
+                    color: #fff; padding: .3rem .7rem; border-radius: 3px; cursor: pointer; }
+    main { padding: 1.5rem; max-width: 1400px; }
+    h2 { font-size: .82rem; text-transform: uppercase; letter-spacing: .04em;
+         color: #555; margin: 1.6rem 0 .6rem; }
+    h2:first-of-type { margin-top: 0; }
+    .card { background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,.1); border-radius: 4px; }
+    .add-form { padding: 1rem; display: flex; gap: .5rem; align-items: flex-end; flex-wrap: wrap; }
+    .add-form label { display: block; font-size: .72rem; text-transform: uppercase;
+                      letter-spacing: .03em; color: #666; margin-bottom: .25rem; }
+    .add-form input, .add-form select { padding: .45rem; border: 1px solid #ccc;
+                                        border-radius: 3px; font-size: .87rem; }
+    .add-form input[name=name] { min-width: 260px; }
+    .add-form input[name=monitor_limit] { width: 90px; }
+    button.primary { background: #1f4e79; color: #fff; border: none; cursor: pointer;
+                     padding: .5rem 1rem; border-radius: 3px; font-size: .87rem; }
+    button.ghost { background: #fff; border: 1px solid #ccc; cursor: pointer;
+                   padding: .25rem .6rem; border-radius: 3px; font-size: .76rem; color: #444; }
+    button.danger { color: #a32020; border-color: #e8c4c0; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { padding: .55rem .75rem; text-align: left; border-bottom: 1px solid #eee;
+             font-size: .87rem; vertical-align: top; }
+    th { background: #fafafa; font-weight: 600; font-size: .74rem; text-transform: uppercase;
+         letter-spacing: .03em; color: #555; }
+    td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+    .pill { padding: .12rem .5rem; border-radius: 10px; font-size: .72rem; white-space: nowrap; }
+    .on { background: #e3f4e6; color: #1d6b2c; }
+    .off { background: #f0f0f0; color: #666; }
+    .ok { background: #e3f4e6; color: #1d6b2c; }
+    .partial { background: #fff4e0; color: #8a5a00; }
+    .failed { background: #fdecea; color: #a32020; }
+    .running { background: #e8eef5; color: #29527a; }
+    .flair { background: #e8eef5; color: #29527a; padding: .1rem .45rem;
+             border-radius: 10px; font-size: .7rem; }
+    .muted { color: #888; font-size: .78rem; }
+    .banner { padding: .6rem 1rem; border-radius: 4px; margin-bottom: 1rem; font-size: .87rem; }
+    .banner.notice { background: #e3f4e6; color: #1d6b2c; }
+    .banner.error { background: #fdecea; color: #a32020; }
+    .toolbar { display: flex; gap: .5rem; align-items: center; margin-bottom: .6rem; }
+    .title-cell a { color: #1f4e79; text-decoration: none; }
+    .title-cell a:hover { text-decoration: underline; }
+    .empty { padding: 1.2rem; color: #666; font-size: .87rem; }
+    code { background: #f0f2f5; padding: .1rem .3rem; border-radius: 3px; font-size: .82rem; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>{{ agency_name }} &mdash; Monitoring</h1>
+    <nav>
+      <a href="/records">Community Feed</a>
+      <a href="/monitor" class="active">Monitoring</a>
+    </nav>
+    <form method="post" action="/logout" style="margin:0">
+      <button type="submit">Sign out ({{ username }})</button>
+    </form>
+  </header>
+
+  <main>
+    {% if notice %}<div class="banner notice">{{ notice }}</div>{% endif %}
+    {% if error %}<div class="banner error">{{ error }}</div>{% endif %}
+    {% if active_run %}
+      <div class="banner notice">
+        Sweep #{{ active_run['id'] }} is running ({{ active_run['backend'] }}),
+        started {{ active_run['started_at'] }}. Refresh for results.
+      </div>
+    {% endif %}
+
+    <h2>Add a community</h2>
+    <div class="card">
+      <form class="add-form" method="post" action="/monitor/add">
+        <div>
+          <label for="name">Subreddit</label>
+          <input id="name" name="name" placeholder="python  &mdash;  or r/python, or a full URL"
+                 required autocomplete="off">
+        </div>
+        <div>
+          <label for="monitor_sort">Watch</label>
+          <select id="monitor_sort" name="monitor_sort">
+            {% for s in sorts %}
+              <option value="{{ s }}" {% if s == 'new' %}selected{% endif %}>{{ s }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div>
+          <label for="monitor_limit">Posts / sweep</label>
+          <input id="monitor_limit" name="monitor_limit" type="number"
+                 value="50" min="10" max="500">
+        </div>
+        <button class="primary" type="submit">Add to monitoring</button>
+      </form>
+    </div>
+
+    <h2>Monitored communities</h2>
+    <div class="toolbar">
+      <form method="post" action="/monitor/run" style="margin:0">
+        <input type="hidden" name="backend" value="browser">
+        <button class="primary" type="submit">Run sweep now</button>
+      </form>
+      <span class="muted">
+        Opens a Chromium window. For the hourly schedule run
+        <code>python monitor.py --loop</code>.
+      </span>
+    </div>
+
+    <div class="card">
+      <table>
+        <thead>
+          <tr>
+            <th>Community</th>
+            <th>Status</th>
+            <th>Watching</th>
+            <th class="num">Posts</th>
+            <th class="num">New 24h</th>
+            <th>Last checked</th>
+            <th>Newest post seen</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for c in communities %}
+            <tr>
+              <td>
+                <strong>{{ c['display_name'] or 'r/' ~ c['name'] }}</strong>
+                {% if c['active_users'] %}
+                  <div class="muted">{{ '{:,}'.format(c['active_users']) }} weekly active</div>
+                {% elif not c['post_count'] %}
+                  <div class="muted">not fetched yet</div>
+                {% endif %}
+              </td>
+              <td>
+                <span class="pill {{ 'on' if c['monitor_enabled'] else 'off' }}">
+                  {{ 'monitoring' if c['monitor_enabled'] else 'paused' }}
+                </span>
+              </td>
+              <td>{{ c['monitor_sort'] or 'new' }} &middot; {{ c['monitor_limit'] or 50 }}</td>
+              <td class="num">{{ '{:,}'.format(c['post_count']) }}</td>
+              <td class="num">{{ c['new_24h'] }}</td>
+              <td class="muted">{{ (c['last_checked_at'] or 'never')[:16]|replace('T', ' ') }}</td>
+              <td class="muted">{{ (c['newest_at'] or '-')[:16]|replace('T', ' ') }}</td>
+              <td>
+                <form method="post" action="/monitor/toggle" style="display:inline">
+                  <input type="hidden" name="community_id" value="{{ c['id'] }}">
+                  <button class="ghost" type="submit">
+                    {{ 'Pause' if c['monitor_enabled'] else 'Resume' }}
+                  </button>
+                </form>
+                <form method="post" action="/monitor/remove" style="display:inline">
+                  <input type="hidden" name="community_id" value="{{ c['id'] }}">
+                  <button class="ghost danger" type="submit">Remove</button>
+                </form>
+              </td>
+            </tr>
+          {% else %}
+            <tr><td colspan="8" class="empty">
+              Nothing monitored yet. Add a subreddit above.
+            </td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <h2>Recent sweeps</h2>
+    <div class="card">
+      <table>
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>Started</th>
+            <th>Trigger</th>
+            <th>Backend</th>
+            <th>Status</th>
+            <th class="num">Checked</th>
+            <th class="num">New</th>
+            <th class="num">Refreshed</th>
+            <th>Notes</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for r in runs %}
+            <tr>
+              <td>{{ r['id'] }}</td>
+              <td class="muted">{{ (r['started_at'] or '')[:16]|replace('T', ' ') }}</td>
+              <td>{{ r['trigger'] }}</td>
+              <td>{{ r['backend'] }}</td>
+              <td><span class="pill {{ r['status'] }}">{{ r['status'] }}</span></td>
+              <td class="num">{{ r['communities_checked'] }}</td>
+              <td class="num">{{ r['posts_new'] }}</td>
+              <td class="num">{{ r['posts_refreshed'] }}</td>
+              <td class="muted">
+                {% if r['error'] %}{{ r['error'][:70] }}
+                {% elif r['failed_items'] %}{{ r['failed_items'] }} community issue(s)
+                {% endif %}
+              </td>
+            </tr>
+          {% else %}
+            <tr><td colspan="9" class="empty">
+              No sweeps yet. Hit &ldquo;Run sweep now&rdquo;, or start the hourly
+              schedule with <code>python monitor.py --loop</code>.
+            </td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <h2>Latest discoveries</h2>
+    <div class="card">
+      <table>
+        <thead>
+          <tr>
+            <th>Post</th>
+            <th>Community</th>
+            <th>Author</th>
+            <th>Flair</th>
+            <th class="num">Score</th>
+            <th class="num">Comments</th>
+            <th>Posted</th>
+            <th>First seen</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for p in discoveries %}
+            <tr>
+              <td class="title-cell">
+                <a href="{{ p['permalink'] }}" target="_blank" rel="noopener noreferrer">{{ p['title'] }}</a>
+                <div class="muted">{{ p['domain'] }}</div>
+              </td>
+              <td>{{ p['community_display'] or 'r/' ~ p['community_name'] }}</td>
+              <td>u/{{ p['author'] }}</td>
+              <td>{% if p['flair'] %}<span class="flair">{{ p['flair'] }}</span>{% endif %}</td>
+              <td class="num">{{ '{:,}'.format(p['score'] or 0) }}</td>
+              <td class="num">{{ '{:,}'.format(p['num_comments'] or 0) }}</td>
+              <td class="muted">{{ (p['created_utc'] or '')[:16]|replace('T', ' ') }}</td>
+              <td class="muted">{{ (p['first_seen_at'] or '')[:16]|replace('T', ' ') }}</td>
+            </tr>
+          {% else %}
+            <tr><td colspan="8" class="empty">Nothing discovered yet.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </main>
+</body>
+</html>

@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>Debug &mdash; Sessions</title>
+    <style>
+        body {
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+            margin: 0;
+            background: #14161a;
+            color: #d8dbe0;
+            font-size: .82rem;
+        }
+
+        header {
+            background: #1e2128;
+            padding: .8rem 1.25rem;
+            border-bottom: 1px solid #2c3038;
+        }
+
+        header h1 {
+            margin: 0;
+            font-size: .95rem;
+            color: #fff;
+            font-weight: 600;
+        }
+
+        header span {
+            color: #7d838f;
+            font-size: .78rem;
+        }
+
+        main {
+            padding: 1.25rem;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        th,
+        td {
+            padding: .45rem .6rem;
+            text-align: left;
+            border-bottom: 1px solid #23262d;
+        }
+
+        th {
+            color: #7d838f;
+            font-weight: 500;
+            text-transform: uppercase;
+            font-size: .7rem;
+            letter-spacing: .05em;
+        }
+
+        tr:hover td {
+            background: #1b1e24;
+        }
+
+        a {
+            color: #6fb3ff;
+            text-decoration: none;
+        }
+
+        a:hover {
+            text-decoration: underline;
+        }
+
+        .ua {
+            color: #7d838f;
+            max-width: 260px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            display: block;
+        }
+
+        .score-0 {
+            color: #4f9d63;
+        }
+
+        .score-low {
+            color: #c9a227;
+        }
+
+        .score-high {
+            color: #d9534f;
+            font-weight: 600;
+        }
+
+        .verdict {
+            padding: .1rem .45rem;
+            border-radius: 3px;
+            font-size: .7rem;
+            background: #2c3038;
+            color: #a6acb8;
+        }
+
+        .empty {
+            color: #7d838f;
+            padding: 2rem 0;
+        }
+    </style>
+</head>
+
+<body>
+    <header>
+        <h1>Session log</h1>
+        <span>{{ sessions|length }} session(s) &mdash; newest first</span>
+    </header>
+
+    <main>
+        {% if sessions %}
+        <table>
+            <thead>
+                <tr>
+                    <th>ID</th>
+                    <th>User</th>
+                    <th>IP</th>
+                    <th>User agent</th>
+                    <th>Created</th>
+                    <th>Reqs</th>
+                    <th>Signals</th>
+                    <th>FPs</th>
+                    <th>Score</th>
+                    <th>Verdict</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for s in sessions %}
+                <tr>
+                    <td><a href="/debug/sessions/{{ s['id'] }}">#{{ s['id'] }}</a></td>
+                    <td>{{ s['username'] or '&mdash;'|safe }}</td>
+                    <td>{{ s['ip_address'] or '&mdash;'|safe }}</td>
+                    <td><span class="ua" title="{{ s['user_agent'] }}">{{ s['user_agent'] or '—' }}</span></td>
+                    <td>{{ s['created_at'] }}</td>
+                    <td>{{ s['request_count'] }}</td>
+                    <td>{{ s['signal_count'] }}</td>
+                    <td>{{ s['fingerprint_count'] }}</td>
+                    <td
+                        class="{% if s['bot_score'] == 0 %}score-0{% elif s['bot_score'] < 50 %}score-low{% else %}score-high{% endif %}">
+                        {{ s['bot_score'] }}
+                    </td>
+                    <td><span class="verdict">{{ s['verdict'] }}</span></td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% else %}
+        <p class="empty">No sessions yet. Log in at <a href="/login">/login</a> to create one.</p>
+        {% endif %}
+    </main>
+</body>
+
+</html>

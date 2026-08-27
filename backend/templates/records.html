@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Community Feed - Insights Portal</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 0; background: #f4f5f7; color: #222; }
+    header { background: #1f4e79; color: #fff; padding: .75rem 1.5rem; display: flex;
+             justify-content: space-between; align-items: center; }
+    header h1 { font-size: 1rem; margin: 0; font-weight: 600; }
+    header nav a { color: #cfe0f0; text-decoration: none; margin-right: 1rem; font-size: .87rem; }
+    header nav a.active { color: #fff; font-weight: 600; }
+    header button { background: transparent; border: 1px solid rgba(255,255,255,.5);
+                    color: #fff; padding: .3rem .7rem; border-radius: 3px; cursor: pointer; }
+    main { padding: 1.5rem; }
+    .filters { margin-bottom: 1rem; display: flex; gap: .5rem; align-items: flex-end; }
+    .filters select, .filters button { padding: .4rem; border: 1px solid #ccc; border-radius: 3px; }
+    .filters button { background: #1f4e79; color: #fff; border: none; cursor: pointer; }
+    table { width: 100%; border-collapse: collapse; background: #fff;
+            box-shadow: 0 1px 3px rgba(0,0,0,.1); }
+    th, td { padding: .55rem .75rem; text-align: left; border-bottom: 1px solid #eee;
+             font-size: .87rem; vertical-align: top; }
+    th { background: #fafafa; font-weight: 600; font-size: .78rem; text-transform: uppercase;
+         letter-spacing: .03em; color: #555; }
+    td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+    .title-cell a { color: #1f4e79; text-decoration: none; }
+    .title-cell a:hover { text-decoration: underline; }
+    .sub { color: #777; font-size: .76rem; margin-top: .15rem; }
+    .flair { padding: .12rem .5rem; border-radius: 10px; font-size: .72rem;
+             background: #e8eef5; color: #29527a; white-space: nowrap; }
+    .nsfw { padding: .12rem .4rem; border-radius: 10px; font-size: .7rem;
+            background: #fdecea; color: #a32020; margin-left: .3rem; }
+    .community { white-space: nowrap; font-weight: 600; color: #444; }
+    .pager { margin-top: 1rem; display: flex; gap: .5rem; align-items: center; font-size: .85rem; }
+    .pager a { color: #1f4e79; text-decoration: none; }
+    .empty { padding: 1.5rem; color: #666; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>{{ agency_name }} &mdash; Community Feed</h1>
+    <nav>
+      <a href="/records" class="active">Community Feed</a>
+      <a href="/monitor">Monitoring</a>
+    </nav>
+    <form method="post" action="/logout" style="margin:0">
+      <button type="submit">Sign out ({{ username }})</button>
+    </form>
+  </header>
+
+  <main>
+    <form class="filters" method="get" action="/records">
+      <div>
+        <select name="community">
+          <option value="">All communities</option>
+          {% for c in communities %}
+            <option value="{{ c['name'] }}" {% if community == c['name'] %}selected{% endif %}>
+              {{ c['display_name'] or 'r/' ~ c['name'] }}
+              {% if c['subscribers'] %}({{ '{:,}'.format(c['subscribers']) }} members)
+              {% elif c['active_users'] %}({{ '{:,}'.format(c['active_users']) }} weekly active){% endif %}
+            </option>
+          {% endfor %}
+        </select>
+      </div>
+      <div>
+        <select name="flair">
+          <option value="">All flairs</option>
+          {% for f in flairs %}
+            <option value="{{ f }}" {% if flair == f %}selected{% endif %}>{{ f }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div>
+        <select name="sort">
+          {% for value, label in [('score', 'Top score'), ('comments', 'Most comments'), ('new', 'Newest')] %}
+            <option value="{{ value }}" {% if sort == value %}selected{% endif %}>{{ label }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <button type="submit">Apply</button>
+    </form>
+
+    <table>
+      <thead>
+        <tr>
+          <th>Post</th>
+          <th>Community</th>
+          <th>Author</th>
+          <th>Flair</th>
+          <th class="num">Score</th>
+          <th class="num">Ratio</th>
+          <th class="num">Comments</th>
+          <th>Posted</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in records %}
+          <tr>
+            <td class="title-cell">
+              <a href="{{ r['permalink'] }}" rel="noopener noreferrer" target="_blank">{{ r['title'] }}</a>
+              {% if r['over18'] %}<span class="nsfw">NSFW</span>{% endif %}
+              <div class="sub">{{ r['domain'] }}</div>
+            </td>
+            <td class="community">{{ r['community_display'] or 'r/' ~ r['community_name'] }}</td>
+            <td>u/{{ r['author'] }}</td>
+            <td>{% if r['flair'] %}<span class="flair">{{ r['flair'] }}</span>{% endif %}</td>
+            <td class="num">{{ '{:,}'.format(r['score'] or 0) }}</td>
+            <td class="num">{% if r['upvote_ratio'] %}{{ '%.0f'|format(r['upvote_ratio'] * 100) }}%{% endif %}</td>
+            <td class="num">{{ '{:,}'.format(r['num_comments'] or 0) }}</td>
+            <td>{{ (r['created_utc'] or '')[:16]|replace('T', ' ') }}</td>
+          </tr>
+        {% else %}
+          <tr><td colspan="8" class="empty">
+            No posts match those filters.
+            {% if not communities %}
+              This account watches no communities yet &mdash; add some on the
+              <a href="/monitor">Monitoring</a> page.
+            {% endif %}
+          </td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+
+    <div class="pager">
+      {% if page > 1 %}
+        <a href="/records?page={{ page - 1 }}&community={{ community }}&flair={{ flair }}&sort={{ sort }}">&larr; Previous</a>
+      {% endif %}
+      <span>Page {{ page }}</span>
+      <a href="/records?page={{ page + 1 }}&community={{ community }}&flair={{ flair }}&sort={{ sort }}">Next &rarr;</a>
+    </div>
+  </main>
+</body>
+</html>
