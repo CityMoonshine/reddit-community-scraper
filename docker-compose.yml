@@ -14,6 +14,10 @@ services:
       # The api never proxies anything; it needs this only to give the right
       # advice when a sweep comes back blocked. Keep it in step with worker.
       WEBSHARE_ENABLED: ${WEBSHARE_ENABLED:-false}
+      # No API key here on purpose: the api reads and writes the rubric as
+      # data and queues work, but never calls the model itself.
+      SCORING_ENABLED: ${SCORING_ENABLED:-false}
+      SCORING_MODEL: ${SCORING_MODEL:-claude-opus-5}
       # nginx is the only ingress, so X-Forwarded-For is trustworthy here.
       # Never set this true if the API is exposed directly.
       TRUST_PROXY_HEADERS: "true"
@@ -72,6 +76,16 @@ services:
       WEBSHARE_MAX_ATTEMPTS: ${WEBSHARE_MAX_ATTEMPTS:-3}
       WEBSHARE_COOLDOWN_MINUTES: ${WEBSHARE_COOLDOWN_MINUTES:-30}
       WEBSHARE_LIST_TTL_MINUTES: ${WEBSHARE_LIST_TTL_MINUTES:-60}
+      # The worker is the only container with a model credential. Scoring runs
+      # here because this is the batch-job image, and because the public-facing
+      # api should never hold an API key.
+      SCORING_ENABLED: ${SCORING_ENABLED:-false}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      SCORING_MODEL: ${SCORING_MODEL:-claude-opus-5}
+      SCORING_EFFORT: ${SCORING_EFFORT:-low}
+      SCORING_BATCH_LIMIT: ${SCORING_BATCH_LIMIT:-40}
+      SCORING_CONCURRENCY: ${SCORING_CONCURRENCY:-4}
+      SCORING_SELFTEXT_CHARS: ${SCORING_SELFTEXT_CHARS:-6000}
     volumes:
       - ./data:/data
     depends_on:

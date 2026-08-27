@@ -212,6 +212,46 @@ SCHEMA = {
         );
     ''',
 
+    # The ranking rubric, edited on the dashboard. Versioned rather than
+    # updated in place: a score is only meaningful next to the rubric that
+    # produced it, so editing the rubric must not silently rewrite the meaning
+    # of every score already on record.
+    'ScoringPrompts': '''
+        CREATE TABLE IF NOT EXISTS ScoringPrompts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            body TEXT NOT NULL,
+            label TEXT,
+            is_active INTEGER DEFAULT 0,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            created_by_user_id INTEGER
+        );
+    ''',
+
+    # One row per (post, rubric). The UNIQUE constraint is what makes
+    # "which posts still need scoring?" a cheap LEFT JOIN, and what stops a
+    # re-run from double-charging for work already done.
+    'PostScores': '''
+        CREATE TABLE IF NOT EXISTS PostScores (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            post_id INTEGER NOT NULL,
+            prompt_id INTEGER NOT NULL,
+            score INTEGER,
+            verdict TEXT,
+            rationale TEXT,
+            dimensions TEXT,
+            model TEXT,
+            input_tokens INTEGER,
+            output_tokens INTEGER,
+            cached_tokens INTEGER,
+            status TEXT DEFAULT 'ok',
+            error TEXT,
+            scored_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE (post_id, prompt_id),
+            FOREIGN KEY (post_id) REFERENCES Posts (id),
+            FOREIGN KEY (prompt_id) REFERENCES ScoringPrompts (id)
+        );
+    ''',
+
     'MonitorRunItems': '''
         CREATE TABLE IF NOT EXISTS MonitorRunItems (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -234,7 +274,34 @@ INDEXES = (
     'CREATE INDEX IF NOT EXISTS idx_runitems_run ON MonitorRunItems (run_id);',
     'CREATE INDEX IF NOT EXISTS idx_runitems_community ON MonitorRunItems (community_id, id DESC);',
     'CREATE INDEX IF NOT EXISTS idx_requestlog_session ON RequestLog (session_id);',
+    'CREATE INDEX IF NOT EXISTS idx_postscores_prompt ON PostScores (prompt_id, score DESC);',
+    'CREATE INDEX IF NOT EXISTS idx_postscores_post ON PostScores (post_id);',
 )
+
+# The rubric the dashboard starts with. Written to be edited - it is an example
+# of the shape that works (what to reward, what to punish, what the number
+# means), not a rule the operator is stuck with.
+DEFAULT_SCORING_PROMPT = """\
+Rank each post by how much a knowledgeable reader would gain from opening it.
+
+Reward:
+  - concrete specifics: real numbers, versions, error messages, named tools
+  - first-hand experience over second-hand summary
+  - posts that show their working, including what went wrong
+  - a genuine question with enough context to answer
+
+Punish:
+  - engagement bait, rage bait, and vague "thoughts?" posts
+  - undisclosed promotion and thin content marketing
+  - a headline that the body does not support
+  - anything whose whole value is already in the title
+
+Score 0-100, where 50 is an ordinary post that is fine but not worth seeking
+out, 80+ is worth going out of your way to read, and under 20 is noise.
+
+Judge the post on its own merits. A high Reddit score is evidence about the
+crowd, not about quality - a popular post can still be noise.
+"""
 
 # Columns added after a table shipped. Checked against PRAGMA table_info rather
 # than caught as errors, so this is safe to run on every startup.
@@ -251,11 +318,47 @@ MIGRATIONS = {
         # ALTER TABLE ADD COLUMN. The upsert sets it explicitly.
         ('first_seen_at', 'TEXT'),
         ('first_seen_run_id', 'INTEGER'),
+
+        # Everything below is detail the original ingest threw away. The API
+        # backend fills all of it; the browser backend fills what the DOM
+        # exposes and leaves the rest null - see the COALESCE note in
+        # store.upsert_posts for why nulls here are not destructive.
+        ('thumbnail', 'TEXT'),
+        ('preview_image', 'TEXT'),
+        ('media_url', 'TEXT'),
+        ('post_hint', 'TEXT'),
+        ('is_video', 'INTEGER DEFAULT 0'),
+        ('is_gallery', 'INTEGER DEFAULT 0'),
+        ('gallery_urls', 'TEXT'),
+        ('total_awards', 'INTEGER'),
+        ('gilded', 'INTEGER'),
+        ('edited_utc', 'TEXT'),
+        ('locked', 'INTEGER DEFAULT 0'),
+        ('archived', 'INTEGER DEFAULT 0'),
+        ('spoiler', 'INTEGER DEFAULT 0'),
+        ('distinguished', 'TEXT'),
+        ('contest_mode', 'INTEGER DEFAULT 0'),
+        ('is_original_content', 'INTEGER DEFAULT 0'),
+        ('author_flair', 'TEXT'),
+        ('flair_bg', 'TEXT'),
+        ('flair_text_color', 'TEXT'),
+        ('num_crossposts', 'INTEGER'),
+        ('crosspost_origin', 'TEXT'),
+        ('removed_by_category', 'TEXT'),
+        # The stored selftext is capped for display; this records how long the
+        # body actually was, so a truncated preview is visible as truncated
+        # rather than passing for the whole post.
+        ('selftext_chars', 'INTEGER'),
     ],
     'MonitorRuns': [
         ('queued_at', 'TEXT'),
         # NULL means "every monitored community" - the scheduled case.
         ('only_community_id', 'INTEGER'),
+        # 'sweep' scrapes; 'score' only ranks what is already stored. Both go
+        # through the same queue so the one-at-a-time guard covers both, and a
+        # rescore cannot start while a sweep is mid-flight.
+        ('kind', "TEXT DEFAULT 'sweep'"),
+        ('posts_scored', 'INTEGER DEFAULT 0'),
     ],
 }
 
@@ -280,11 +383,25 @@ def init_db(seed=True):
 
         cursor.execute('UPDATE Posts SET first_seen_at = fetched_at WHERE first_seen_at IS NULL;')
         cursor.execute('UPDATE MonitorRuns SET queued_at = started_at WHERE queued_at IS NULL;')
+        cursor.execute("UPDATE MonitorRuns SET kind = 'sweep' WHERE kind IS NULL;")
 
         # The single WorkerStatus row must exist before either side reads it.
         cursor.execute(
             "INSERT OR IGNORE INTO WorkerStatus (id, state) VALUES (1, 'never started');"
         )
+
+        # Seed the rubric once. Guarded on the table being empty rather than on
+        # a fixed id, so an operator who edits the rubric never has the default
+        # reappear underneath them on the next restart.
+        if not cursor.execute('SELECT 1 FROM ScoringPrompts LIMIT 1;').fetchone():
+            cursor.execute(
+                '''
+                INSERT INTO ScoringPrompts (body, label, is_active)
+                VALUES (?, 'default rubric', 1);
+                ''',
+                (DEFAULT_SCORING_PROMPT,),
+            )
+            print('seeded the default scoring rubric', flush=True)
 
         for statement in INDEXES:
             cursor.execute(statement)

@@ -20,8 +20,9 @@ import sys
 import traceback
 from datetime import datetime, timedelta, timezone
 
-from app.config import (QUEUE_POLL_SECONDS, SCRAPE_BACKEND, STALE_RUN_MINUTES,
-                        SWEEP_INTERVAL_MINUTES, WEBSHARE_ENABLED)
+from app.config import (QUEUE_POLL_SECONDS, SCORING_ENABLED, SCRAPE_BACKEND,
+                        STALE_RUN_MINUTES, SWEEP_INTERVAL_MINUTES,
+                        WEBSHARE_ENABLED)
 from app.db import connection_scope, wait_for_schema
 from app.ingest.store import upsert_community, upsert_posts
 from app.worker import status
@@ -57,8 +58,8 @@ def reap_stale_runs(connection):
     return cursor.rowcount
 
 
-def enqueue_run(trigger, backend, only_community_id=None):
-    """Queue a sweep. Returns the run id, or None if one is already pending.
+def enqueue_run(trigger, backend, only_community_id=None, kind='sweep'):
+    """Queue a run. Returns the run id, or None if one is already pending.
 
     Coalescing matters for the cron trigger: if a sweep overruns its slot we
     want the next tick skipped, not a backlog of identical runs.
@@ -76,10 +77,10 @@ def enqueue_run(trigger, backend, only_community_id=None):
         cursor.execute(
             """
             INSERT INTO MonitorRuns (trigger, backend, queued_at, status,
-                                     only_community_id)
-            VALUES (?, ?, ?, 'queued', ?);
+                                     only_community_id, kind)
+            VALUES (?, ?, ?, 'queued', ?, ?);
             """,
-            (trigger, backend, utcnow(), only_community_id),
+            (trigger, backend, utcnow(), only_community_id, kind),
         )
 
         return cursor.lastrowid
@@ -148,16 +149,16 @@ def claim_run():
         ).fetchone()
 
 
-def finish_run(run_id, outcome, checked, new, refreshed, error=None):
+def finish_run(run_id, outcome, checked, new, refreshed, error=None, scored=0):
     with connection_scope() as connection:
         connection.execute(
             """
             UPDATE MonitorRuns
             SET finished_at = ?, status = ?, communities_checked = ?,
-                posts_new = ?, posts_refreshed = ?, error = ?
+                posts_new = ?, posts_refreshed = ?, error = ?, posts_scored = ?
             WHERE id = ?;
             """,
-            (utcnow(), outcome, checked, new, refreshed, error, run_id),
+            (utcnow(), outcome, checked, new, refreshed, error, scored, run_id),
         )
 
 
@@ -354,10 +355,70 @@ def sweep_api(run_id, communities):
     return checked, total_new, total_refreshed
 
 
+def run_scoring(run_id, label='scoring'):
+    """Score whatever the active rubric has not covered yet.
+
+    Returns the number scored. Never raises: a scoring failure must not turn a
+    sweep that successfully collected posts into a failed run - the posts are
+    stored either way, and the next pass will pick up what this one missed.
+    """
+    if not SCORING_ENABLED:
+        return 0
+
+    from app.ingest.scoring import ScoringError, score_pending
+
+    try:
+        status.sweeping(run_id, None, label)
+        summary = score_pending(on_progress=status.activity)
+    except ScoringError as exc:
+        print(f'[scoring] {exc}', flush=True)
+        return 0
+    except Exception as exc:  # noqa: BLE001 - see docstring
+        traceback.print_exc()
+        print(f'[scoring] abandoned this pass: {exc}', flush=True)
+        return 0
+
+    if summary['remaining']:
+        print(f"[scoring] {summary['remaining']} posts still queued - they will "
+              f"be picked up next run", flush=True)
+
+    return summary['scored']
+
+
+def execute_score_run(run):
+    """A scoring-only run: rank what is already stored, scrape nothing.
+
+    Queued when the operator edits the rubric, which invalidates every existing
+    score at once - re-scraping to re-rank would be pure waste.
+    """
+    run_id = run['id']
+
+    if not SCORING_ENABLED:
+        reason = 'scoring is disabled (set SCORING_ENABLED=true)'
+        finish_run(run_id, 'ok', 0, 0, 0, error=reason)
+        status.idle(last_error=reason)
+        print(f'Run {run_id}: {reason}.', flush=True)
+        return
+
+    print(f'Run {run_id}: scoring pass', flush=True)
+    scored = run_scoring(run_id, 'ranking posts against the rubric')
+
+    finish_run(run_id, 'ok', 0, 0, 0, scored=scored)
+    status.idle()
+    print(f'\nRun {run_id} ok: {scored} posts scored', flush=True)
+
+
 def execute_run(run):
     """Do the work for an already-claimed run row."""
     run_id = run['id']
     backend = run['backend'] or SCRAPE_BACKEND
+
+    # sqlite3.Row has no .get(); the column is absent on pre-migration rows.
+    kind = run['kind'] if 'kind' in run.keys() else 'sweep'
+
+    if kind == 'score':
+        execute_score_run(run)
+        return
 
     # sqlite3.Row has no .get(), and the column is absent on rows written
     # before the migration added it.
@@ -388,13 +449,19 @@ def execute_run(run):
         status.idle(last_error=str(exc)[:400])
         return
 
+    # Score after the scrape, inside the same run. Posts that were just
+    # discovered are exactly the ones an operator is about to look at, and
+    # making it a separate queued run would leave the feed unranked until the
+    # next tick.
+    scored = run_scoring(run_id, f'ranking new posts from {scope}')
+
     outcome = 'ok' if checked == len(communities) else 'partial'
-    finish_run(run_id, outcome, checked, new, refreshed)
+    finish_run(run_id, outcome, checked, new, refreshed, scored=scored)
     status.idle(last_error=None if outcome == 'ok' else
                 f'{len(communities) - checked} of {len(communities)} communities failed')
 
     print(f'\nRun {run_id} {outcome}: {checked}/{len(communities)} checked, '
-          f'{new} new, {refreshed} refreshed', flush=True)
+          f'{new} new, {refreshed} refreshed, {scored} scored', flush=True)
 
 
 def process_queue():
@@ -419,8 +486,8 @@ def resolve_community(name):
     return row
 
 
-def run_once(backend=None, community=None):
-    """Queue a sweep and run it immediately, for CLI use."""
+def run_once(backend=None, community=None, kind='sweep'):
+    """Queue a run and execute it immediately, for CLI use."""
     reap_orphaned_runs()
     backend = backend or SCRAPE_BACKEND
     preflight_webshare(backend)
@@ -436,10 +503,10 @@ def run_once(backend=None, community=None):
 
         only_id = row['id']
 
-    run_id = enqueue_run('manual', backend, only_id)
+    run_id = enqueue_run('manual', backend, only_id, kind)
 
     if run_id is None:
-        print('A sweep is already queued or running.', flush=True)
+        print('A run is already queued or running.', flush=True)
         return None
 
     return process_queue()
@@ -555,13 +622,16 @@ def main():
     parser.add_argument('--community', default=None,
                         help='Sweep only this subreddit (implies --once). '
                              'Runs even if the community is paused.')
+    parser.add_argument('--score', action='store_true',
+                        help='Score stored posts against the rubric and exit. '
+                             'Scrapes nothing.')
     args = parser.parse_args()
 
-    if args.community and not args.loop:
+    if (args.community or args.score) and not args.loop:
         args.once = True
 
     if not args.once and not args.loop:
-        parser.error('Pass --once or --loop')
+        parser.error('Pass --once, --loop or --score')
 
     if not wait_for_schema():
         print('Schema never appeared - is the api container running?', file=sys.stderr)
@@ -570,7 +640,7 @@ def main():
     if args.loop:
         loop(args.interval, args.backend)
     else:
-        run_once(args.backend, args.community)
+        run_once(args.backend, args.community, 'score' if args.score else 'sweep')
 
     return 0
 

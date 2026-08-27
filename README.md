@@ -127,6 +127,83 @@ The client paces at ~50 req/min (half the 100/min OAuth budget), reads
 Either path is an upsert keyed on Reddit's post id: rows persist and their score
 and comment count refresh, so repeat ingests show movement, not duplicates.
 
+## AI ranking
+
+Reddit's score tells you what the crowd did. The rubric on the dashboard tells
+you what *you* care about — and re-ranks the whole archive against it.
+
+```bash
+SCORING_ENABLED=true
+ANTHROPIC_API_KEY=...      # console.anthropic.com
+```
+
+Only the **worker** gets the key. The public-facing api reads and writes the
+rubric as data and queues work, but never calls a model — so the container
+exposed to the internet holds no model credentials at all.
+
+**The rubric is the feature.** Everything about what makes a post good is free
+text you edit at `/#monitor`, sent with every post. `app/ingest/scoring.py` owns
+only the *output contract* — a 0–100 score, a short verdict, a one-line
+rationale, and per-dimension subscores whose axes are derived from whatever your
+rubric happens to talk about. Rewrite the rubric to care about install
+instructions and the axes become install-instruction axes.
+
+**Rubrics are versioned, never edited in place.** A score only means something
+next to the rubric that produced it, so saving publishes a new version and
+deactivates the old one. Posts go back to "unscored" under the new rubric
+without anything being deleted — and *Restore* on an earlier version brings its
+scores straight back, because they were never thrown away. Saving unchanged text
+is a no-op rather than a new version, so double-clicking Save doesn't orphan the
+archive.
+
+**Cost shape.** The rubric is identical for every post in a pass and is by far
+the largest part of the prompt, so it goes in a cached system block: the first
+post pays for it, the rest read it from cache. That's also why scoring runs as a
+*pass* rather than per-post on demand — the cache locality is what makes it
+affordable. Concurrency is deliberately small and the first request is fired
+alone, so the cache is written before the rest race for it.
+
+```bash
+python -m app.ingest.scoring --show-rubric
+python -m app.ingest.scoring --pending 20
+python -m app.ingest.scoring --post 1a2b3c --dry-run   # renders the prompt, no API call
+python -m app.worker.monitor --score                   # a scoring-only run
+```
+
+Scoring runs go through the **same queue as sweeps**, as `kind='score'` — so the
+one-run-at-a-time guard covers both and a rescore can't race a sweep's own
+scoring phase for the same backlog. A sweep scores what it just discovered
+before it finishes, so the feed is ranked by the time you look at it.
+
+Failures are recorded, not swallowed: a post that couldn't be scored leaves a
+row with its error, or the next pass would pick it up, fail identically, and
+spend money on every cycle without the queue ever draining. The feed shows
+*judged*, *awaiting ranking* and *scoring failed* as three distinct states,
+because a broken API key otherwise looks exactly like an ordinary backlog.
+
+The feed sorts by `rank` by default, and also offers **Underrated by Reddit** —
+posts the rubric scores far above their Reddit standing, which is the one view
+that only exists because the two scores disagree.
+
+## What gets captured per post
+
+The ingest pulls everything the source exposes, not just what the old table had:
+thumbnails and preview images, gallery URLs, media links, `post_hint`, awards and
+gildings, edited/locked/archived/spoiler/contest/OC flags, `distinguished`,
+author flair, flair colours, crosspost origin, `removed_by_category`, and the
+full self-post body (capped at 40k, with `selftext_chars` recording the true
+length so a clipped body is visibly clipped).
+
+The two backends see different amounts of this, which drives one rule in
+`store.upsert_posts` worth knowing about: **a later sweep never destroys detail
+an earlier one captured.** Fields the browser can't see are `COALESCE`d rather
+than overwritten, API-only flags stay nullable so "can't see it" stays distinct
+from "Reddit says no", and `selftext` is never traded for a shorter body — the
+browser only sees the feed's truncated teaser, and without that guard a browser
+sweep following an API sweep would quietly replace a complete post with its
+first paragraph. Since the AI scorer reads that column, the damage would have
+shown up as worse rankings rather than as an obviously empty field.
+
 ## Monitoring dashboard
 
 Sign in and go to **`/monitor`**. That's where you add the communities to watch:
@@ -189,6 +266,12 @@ Sign in at `/login` with any seeded username and `password123` (the usernames
 print during `createDb.py`). Posts live at `/records`; the monitoring dashboard
 is at `/monitor`.
 
+The SPA is set as an editorial page: the feed is a numbered ranking with a
+headline, byline and standfirst, and the AI verdict sits where a pull-quote
+would. Serif for anything you read, letterspaced uppercase sans for anything you
+scan. It follows the OS light/dark preference; the palette swaps but the
+typography does not.
+
 ## Schema
 
 | Table | Role |
@@ -196,7 +279,9 @@ is at `/monitor`.
 | `Communities` | one row per subreddit |
 | `Posts` | the records a scraper wants; `post_id` is Reddit's own id |
 | `Watchlist` | which accounts may see which communities — the auth gate |
-| `MonitorRuns` | one row per sweep: trigger, backend, status, totals |
+| `MonitorRuns` | one row per run: `kind` is `sweep` or `score`, plus totals |
+| `ScoringPrompts` | the ranking rubric, versioned - one row per edit |
+| `PostScores` | one verdict per (post, rubric): score, rationale, dimensions |
 | `MonitorRunItems` | per-community outcome inside a sweep |
 | `Users`, `Sessions` | login and cookie-backed sessions |
 | `RequestLog` | every request: header order, `sec-fetch-mode`, `sec-ch-ua`, latency |

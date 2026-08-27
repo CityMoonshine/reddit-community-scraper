@@ -23,6 +23,7 @@ from app.api.routes import communities as community_routes
 from app.api.routes import debug as debug_routes
 from app.api.routes import monitor as monitor_routes
 from app.api.routes import posts as post_routes
+from app.api.routes import scoring as scoring_routes
 from app.api.routes import status as status_routes
 from app.db import connection_scope
 from app.schema import init_db
@@ -102,4 +103,5 @@ app.include_router(post_routes.router)
 app.include_router(community_routes.router)
 app.include_router(monitor_routes.router)
 app.include_router(status_routes.router)
+app.include_router(scoring_routes.router)
 app.include_router(debug_routes.router)

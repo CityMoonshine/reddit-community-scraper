@@ -72,9 +72,15 @@ def discoveries(limit: int = Query(25, ge=1, le=200)):
     with connection_scope() as connection:
         rows = connection.execute(
             '''
-            SELECT p.*, c.name AS community_name, c.display_name AS community_display
+            SELECT p.*, c.name AS community_name, c.display_name AS community_display,
+                   s.score AS ai_score, s.verdict AS ai_verdict,
+                   s.rationale AS ai_rationale
             FROM Posts p
             JOIN Communities c ON c.id = p.community_id
+            LEFT JOIN PostScores s
+                   ON s.post_id = p.id
+                  AND s.prompt_id = (SELECT id FROM ScoringPrompts
+                                      WHERE is_active = 1 ORDER BY id DESC LIMIT 1)
             WHERE p.first_seen_at IS NOT NULL
             ORDER BY p.first_seen_at DESC, p.score DESC
             LIMIT ?;
@@ -119,8 +125,9 @@ def queue_run(body: RunBody):
 
         cursor.execute(
             '''
-            INSERT INTO MonitorRuns (trigger, backend, queued_at, status, only_community_id)
-            VALUES ('manual', ?, datetime('now'), 'queued', ?);
+            INSERT INTO MonitorRuns (trigger, backend, queued_at, status,
+                                     only_community_id, kind)
+            VALUES ('manual', ?, datetime('now'), 'queued', ?, 'sweep');
             ''',
             (backend, target['id'] if target else None),
         )

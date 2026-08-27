@@ -120,3 +120,32 @@ WEBSHARE_ROTATE = os.getenv('WEBSHARE_ROTATE', 'community')
 WEBSHARE_EGRESS_CHECK_URL = os.getenv(
     'WEBSHARE_EGRESS_CHECK_URL', 'https://ipv4.webshare.io/'
 )
+
+# ------------------------------------------------------------- ai scoring
+# Rank posts with Claude against a rubric the operator edits on the dashboard.
+# The rubric lives in the database (ScoringPrompts), not here - the whole point
+# is that it changes without a redeploy. What lives here is how to call the API.
+SCORING_ENABLED = _bool('SCORING_ENABLED', False)
+
+ANTHROPIC_API_KEY = os.getenv('ANTHROPIC_API_KEY')
+
+SCORING_MODEL = os.getenv('SCORING_MODEL', 'claude-opus-5')
+
+# Scoring is high-volume and each post is a small judgement, which is the shape
+# that does not repay deep reasoning. Raise it if the rubric gets subtle.
+SCORING_EFFORT = os.getenv('SCORING_EFFORT', 'low')
+
+# Posts scored per pass. A sweep can discover hundreds; scoring them all in one
+# go would make the run unbounded, so it drains over successive passes.
+SCORING_BATCH_LIMIT = _int('SCORING_BATCH_LIMIT', 40)
+
+# Thinking tokens count against this, so it is not as generous as it looks.
+SCORING_MAX_TOKENS = _int('SCORING_MAX_TOKENS', 4000)
+
+# Posts scored in parallel. The rubric prefix is cached, so concurrency mostly
+# buys latency rather than cost.
+SCORING_CONCURRENCY = _int('SCORING_CONCURRENCY', 4)
+
+# How much of a self-post body to send. Long enough to judge, short enough that
+# one rambling post does not dominate the bill.
+SCORING_SELFTEXT_CHARS = _int('SCORING_SELFTEXT_CHARS', 6000)

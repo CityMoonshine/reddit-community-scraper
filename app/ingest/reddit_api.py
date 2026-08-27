@@ -21,7 +21,8 @@ import httpx
 from app.config import (REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET, REDDIT_PASSWORD,
                         REDDIT_USER_AGENT, REDDIT_USERNAME)
 from app.db import connection_scope
-from app.ingest.store import epoch_to_iso, upsert_community, upsert_posts
+from app.ingest.store import (SELFTEXT_CAP, epoch_to_iso, upsert_community,
+                             upsert_posts)
 
 TOKEN_URL = 'https://www.reddit.com/api/v1/access_token'
 API_BASE = 'https://oauth.reddit.com'
@@ -35,8 +36,6 @@ RATELIMIT_FLOOR = 5
 
 # Reddit caps listing pages at 100 items regardless of what you ask for.
 PAGE_SIZE = 100
-
-SELFTEXT_CAP = 2000
 
 SORTS = ('hot', 'new', 'top', 'rising', 'controversial')
 TIME_FILTERS = ('hour', 'day', 'week', 'month', 'year', 'all')
@@ -248,7 +247,82 @@ def fetch_posts(client, subreddit, sort='new', limit=50, time_filter='week'):
     return collected[:limit]
 
 
+def placeholder_thumb(value):
+    """Reddit puts sentinels like 'self', 'default', 'nsfw' in `thumbnail`.
+
+    They are not URLs, and storing them means the UI has to know the sentinel
+    list to avoid rendering a broken image.
+    """
+    if not value or not str(value).startswith('http'):
+        return None
+    return value
+
+
+def preview_url(data):
+    """The largest preview Reddit generated, HTML-unescaped.
+
+    Preview URLs arrive with &amp; in them even under raw_json=1 in some
+    responses, and a URL with a literal &amp; 404s.
+    """
+    images = ((data.get('preview') or {}).get('images') or [])
+
+    if not images:
+        return None
+
+    source = (images[0] or {}).get('source') or {}
+    url = source.get('url')
+
+    return url.replace('&amp;', '&') if url else None
+
+
+def gallery_urls(data):
+    """Ordered media URLs for a gallery post, or None if it isn't one."""
+    items = (data.get('gallery_data') or {}).get('items') or []
+    metadata = data.get('media_metadata') or {}
+
+    urls = []
+
+    for item in items:
+        media = metadata.get(item.get('media_id')) or {}
+        # 's' is the full-size variant; 'u' is its URL, 'gif' for animations.
+        source = media.get('s') or {}
+        url = source.get('u') or source.get('gif')
+
+        if url:
+            urls.append(url.replace('&amp;', '&'))
+
+    return urls or None
+
+
+def media_url(data):
+    """The playable/embedded media behind a post, if Reddit hosts one."""
+    media = data.get('secure_media') or data.get('media') or {}
+
+    reddit_video = media.get('reddit_video') or {}
+    if reddit_video.get('fallback_url'):
+        return reddit_video['fallback_url']
+
+    oembed = media.get('oembed') or {}
+    return oembed.get('url') or oembed.get('thumbnail_url')
+
+
+def crosspost_origin(data):
+    """'r/<sub>' this was crossposted from, or None."""
+    parents = data.get('crosspost_parent_list') or []
+
+    if not parents:
+        return None
+
+    return (parents[0] or {}).get('subreddit_name_prefixed')
+
+
 def parse_post(data):
+    selftext = data.get('selftext') or ''
+
+    # `edited` is False when untouched and an epoch float when edited - a union
+    # type in the wire format, so it cannot go straight into a TEXT column.
+    edited = data.get('edited')
+
     return {
         'post_id': data.get('id'),
         'title': data.get('title', ''),
@@ -263,8 +337,34 @@ def parse_post(data):
         'over18': 1 if data.get('over_18') else 0,
         'is_self': 1 if data.get('is_self') else 0,
         'stickied': 1 if data.get('stickied') else 0,
-        'selftext': (data.get('selftext') or '')[:SELFTEXT_CAP],
+        'selftext': selftext[:SELFTEXT_CAP],
+        'selftext_chars': len(selftext) or None,
         'created_utc': epoch_to_iso(data.get('created_utc')),
+
+        'thumbnail': placeholder_thumb(data.get('thumbnail')),
+        'preview_image': preview_url(data),
+        'media_url': media_url(data),
+        'post_hint': data.get('post_hint'),
+        'is_video': 1 if data.get('is_video') else 0,
+        'is_gallery': 1 if data.get('is_gallery') else 0,
+        'gallery_urls': gallery_urls(data),
+        'total_awards': data.get('total_awards_received'),
+        'gilded': data.get('gilded'),
+        'edited_utc': (epoch_to_iso(edited)
+                       if isinstance(edited, (int, float))
+                       and not isinstance(edited, bool) else None),
+        'locked': 1 if data.get('locked') else 0,
+        'archived': 1 if data.get('archived') else 0,
+        'spoiler': 1 if data.get('spoiler') else 0,
+        'distinguished': data.get('distinguished'),
+        'contest_mode': 1 if data.get('contest_mode') else 0,
+        'is_original_content': 1 if data.get('is_original_content') else 0,
+        'author_flair': data.get('author_flair_text'),
+        'flair_bg': data.get('link_flair_background_color') or None,
+        'flair_text_color': data.get('link_flair_text_color') or None,
+        'num_crossposts': data.get('num_crossposts'),
+        'crosspost_origin': crosspost_origin(data),
+        'removed_by_category': data.get('removed_by_category'),
     }
 
 

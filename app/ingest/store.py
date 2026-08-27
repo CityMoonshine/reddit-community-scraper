@@ -1,9 +1,35 @@
 """Writing fetched Reddit data into SQLite. Shared by both scrape backends."""
 
+import json
 from datetime import datetime, timezone
 
-# Self-post bodies can be enormous; the UI only ever renders a preview.
-SELFTEXT_CAP = 2000
+# Self-post bodies can be enormous. This is generous rather than tight because
+# the AI scorer reads the stored body - truncating to a UI preview length would
+# mean ranking posts on their first paragraph. Posts.selftext_chars records the
+# true length, so a truncated body is visible as truncated.
+SELFTEXT_CAP = 40000
+
+# Columns the browser backend often cannot see. Refreshing them with NULL would
+# wipe values a previous API sweep filled in, so the upsert COALESCEs these.
+PRESERVE_ON_NULL = (
+    'thumbnail', 'preview_image', 'media_url', 'post_hint', 'gallery_urls',
+    'total_awards', 'gilded', 'edited_utc', 'distinguished', 'author_flair',
+    'flair_bg', 'flair_text_color', 'num_crossposts', 'crosspost_origin',
+    'removed_by_category', 'upvote_ratio', 'url', 'domain', 'created_utc',
+    'selftext_chars',
+    # Flags only the OAuth payload carries. They must stay nullable for this to
+    # work: coercing an absent flag to 0 would make "the browser cannot see
+    # this" indistinguishable from "Reddit says no", and a browser sweep would
+    # quietly clear them.
+    'archived', 'contest_mode', 'is_original_content',
+)
+
+
+def as_json(value):
+    """Lists are stored as JSON text - sqlite has no array type."""
+    if not value:
+        return None
+    return json.dumps(value)
 
 
 def epoch_to_iso(value):
@@ -56,6 +82,88 @@ def upsert_community(connection, community):
     return row[0]
 
 
+# Declared once and used to build the column list, the placeholders and the row
+# tuples. Keeping three parallel 39-item lists in sync by hand is exactly how a
+# column ends up quietly holding the value of its neighbour.
+POST_COLUMNS = (
+    'post_id', 'community_id', 'title', 'author', 'permalink', 'url', 'domain',
+    'flair', 'score', 'upvote_ratio', 'num_comments', 'over18', 'is_self',
+    'stickied', 'selftext', 'selftext_chars', 'created_utc',
+    'thumbnail', 'preview_image', 'media_url', 'post_hint', 'is_video',
+    'is_gallery', 'gallery_urls', 'total_awards', 'gilded', 'edited_utc',
+    'locked', 'archived', 'spoiler', 'distinguished', 'contest_mode',
+    'is_original_content', 'author_flair', 'flair_bg', 'flair_text_color',
+    'num_crossposts', 'crosspost_origin', 'removed_by_category',
+)
+
+# Identity, not content. Refreshing these would either be a no-op or would move
+# a post between communities on a crosspost sighting.
+IMMUTABLE = ('post_id', 'community_id')
+
+INT_FLAGS = (
+    'over18', 'is_self', 'stickied', 'is_video', 'is_gallery', 'locked',
+    'archived', 'spoiler', 'contest_mode', 'is_original_content',
+)
+
+
+def _refresh_clause():
+    """The ON CONFLICT SET body: COALESCE for the columns a backend may not see."""
+    parts = []
+
+    for column in POST_COLUMNS:
+        if column in IMMUTABLE:
+            continue
+
+        if column == 'selftext':
+            # Never trade a longer body for a shorter one. The browser backend
+            # can only see the feed's truncated teaser, so without this a
+            # browser sweep following an API sweep would replace a complete
+            # self-post with its first paragraph - and the AI scorer reads this
+            # column, so the damage would show up as worse rankings, not as an
+            # obviously empty field.
+            parts.append(
+                'selftext = CASE WHEN length(excluded.selftext) >= '
+                'length(COALESCE(Posts.selftext, \'\')) '
+                'THEN excluded.selftext ELSE Posts.selftext END'
+            )
+        elif column in PRESERVE_ON_NULL:
+            parts.append(f'{column} = COALESCE(excluded.{column}, Posts.{column})')
+        else:
+            parts.append(f'{column} = excluded.{column}')
+
+    parts.append('fetched_at = CURRENT_TIMESTAMP')
+    return ',\n            '.join(parts)
+
+
+def post_values(post, community_id, run_id):
+    """One post dict -> the row tuple, in POST_COLUMNS order plus the extras."""
+    selftext = post.get('selftext') or ''
+
+    values = {
+        **post,
+        'community_id': community_id,
+        'selftext': selftext[:SELFTEXT_CAP],
+        'gallery_urls': as_json(post.get('gallery_urls')),
+    }
+
+    # The true length, not the stored length - so a body clipped at the cap is
+    # identifiable rather than passing for a complete post. An explicit None
+    # from a backend means "I saw a teaser, not the body" and is honoured;
+    # only a backend that never mentions the field falls back to measuring.
+    if 'selftext_chars' not in post:
+        values['selftext_chars'] = len(selftext) or None
+
+    for flag in INT_FLAGS:
+        # Absent means unknown, and unknown must stay NULL for the COALESCE in
+        # the refresh clause to have anything to preserve.
+        if flag in values and values[flag] is not None:
+            values[flag] = 1 if values[flag] else 0
+        else:
+            values[flag] = None
+
+    return tuple(values.get(column) for column in POST_COLUMNS) + (run_id,)
+
+
 def upsert_posts(connection, community_id, posts, run_id=None):
     """Insert new posts, refresh the volatile fields on ones we already have.
 
@@ -84,33 +192,18 @@ def upsert_posts(connection, community_id, posts, run_id=None):
         )
         existing.update(row[0] for row in cursor.fetchall())
 
+    columns = ', '.join(POST_COLUMNS)
+    placeholders = ', '.join('?' * len(POST_COLUMNS))
+
     cursor.executemany(
-        '''
+        f'''
         INSERT INTO Posts (
-            post_id, community_id, title, author, permalink, url, domain, flair,
-            score, upvote_ratio, num_comments, over18, is_self, stickied,
-            selftext, created_utc, fetched_at, first_seen_at, first_seen_run_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                  CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?)
+            {columns}, fetched_at, first_seen_at, first_seen_run_id
+        ) VALUES ({placeholders}, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?)
         ON CONFLICT(post_id) DO UPDATE SET
-            title = excluded.title,
-            flair = excluded.flair,
-            score = excluded.score,
-            upvote_ratio = excluded.upvote_ratio,
-            num_comments = excluded.num_comments,
-            stickied = excluded.stickied,
-            fetched_at = CURRENT_TIMESTAMP;
+            {_refresh_clause()};
         ''',
-        [
-            (
-                p['post_id'], community_id, p['title'], p.get('author'),
-                p.get('permalink'), p.get('url'), p.get('domain'), p.get('flair'),
-                p.get('score'), p.get('upvote_ratio'), p.get('num_comments'),
-                p.get('over18') or 0, p.get('is_self') or 0, p.get('stickied') or 0,
-                (p.get('selftext') or '')[:SELFTEXT_CAP], p.get('created_utc'), run_id,
-            )
-            for p in rows
-        ],
+        [post_values(p, community_id, run_id) for p in rows],
     )
 
     updated = len(existing)

@@ -28,6 +28,7 @@ Standalone use (outside the worker):
 
 import argparse
 import random
+import re
 import sys
 import time
 
@@ -82,6 +83,27 @@ HARVEST_JS = """
     const attr = name => el.getAttribute(name);
     const flairEl = el.querySelector('shreddit-post-flair, a[href*="flair_name"], [class*="flair"]');
     const bodyEl = el.querySelector('[data-post-click-location="text-body"], a[slot="text-body"]');
+
+    // Reddit lazy-loads thumbnails, so a card that has not been near the
+    // viewport carries a data: placeholder. Only take a real remote URL.
+    const imgEl = el.querySelector('img[src^="https"]');
+
+    // The flair chip's colour is applied inline rather than via a class, so
+    // the computed style is the only place it exists.
+    let flairBg = null, flairColor = null;
+    if (flairEl) {
+        try {
+            const style = getComputedStyle(flairEl);
+            flairBg = style.backgroundColor || null;
+            flairColor = style.color || null;
+        } catch (e) { /* detached node mid-recycle */ }
+    }
+
+    // Awards and 'edited' render as text/icons rather than attributes, so
+    // these are presence checks, not values.
+    const awardEl = el.querySelector('award-button, shreddit-award, [class*="award"]');
+    const editedEl = el.querySelector('[class*="edited"], time[datetime][title*="dit"]');
+
     return {
         raw_id: attr('id'),
         title: attr('post-title'),
@@ -98,6 +120,19 @@ HARVEST_JS = """
         promoted: el.hasAttribute('promoted') || attr('view-context') === 'ADPost',
         flair: flairEl ? flairEl.textContent.trim() : null,
         preview: bodyEl ? bodyEl.textContent.trim() : '',
+
+        thumbnail: imgEl ? imgEl.getAttribute('src') : null,
+        flair_bg: flairBg,
+        flair_text_color: flairColor,
+        author_flair: (el.querySelector('[class*="author-flair"]') || {}).textContent || null,
+        spoiler: el.hasAttribute('spoiler'),
+        locked: el.hasAttribute('locked'),
+        pinned: el.hasAttribute('pinned') || el.hasAttribute('stickied'),
+        distinguished: attr('distinguished'),
+        has_award: !!awardEl,
+        edited: !!editedEl,
+        comment_href: attr('comment-count-href'),
+        subreddit: attr('subreddit-prefixed-name'),
     };
 })
 """
@@ -263,6 +298,37 @@ def listing_url(subreddit, sort, time_filter):
     return url
 
 
+def normalise_colour(value):
+    """getComputedStyle gives 'rgb(a, b, c)'; store '#rrggbb' like the API does.
+
+    Without this the same flair arrives in two different notations depending on
+    which backend ran, and the UI would need to understand both.
+    """
+    if not value:
+        return None
+
+    text = str(value).strip()
+
+    if text.startswith('#'):
+        return text
+
+    # Fully transparent means "no colour set", not "black".
+    numbers = re.findall(r'[\d.]+', text)
+
+    if len(numbers) >= 4 and float(numbers[3]) == 0:
+        return None
+
+    if len(numbers) < 3:
+        return None
+
+    try:
+        r, g, b = (int(float(n)) for n in numbers[:3])
+    except ValueError:
+        return None
+
+    return f'#{r:02x}{g:02x}{b:02x}'
+
+
 def parse_card(card):
     """DOM card -> a Posts row. Returns None for anything not worth storing."""
     raw_id = card.get('raw_id') or ''
@@ -290,22 +356,50 @@ def parse_card(card):
     if permalink.startswith('/'):
         permalink = f'https://www.reddit.com{permalink}'
 
+    post_type = (card.get('post_type') or '').lower()
+    domain = card.get('domain') or ''
+
+    # The feed calls a text post 'text', not 'self', so post_type alone misses
+    # most of them. Reddit's own domain for a self post is 'self.<subreddit>',
+    # which is the reliable tell - and getting this wrong means the AI scorer
+    # is told a text post is a link post with its own permalink as the link.
+    is_self = post_type.startswith('self') or domain.startswith('self.')
+
     return {
         'post_id': raw_id[3:],
         'title': card['title'],
         'author': card.get('author'),
         'permalink': permalink,
         'url': card.get('content_href'),
-        'domain': card.get('domain'),
+        'domain': domain or None,
         'flair': (card.get('flair') or '').strip() or None,
         'score': as_int(card.get('score')),
         'upvote_ratio': as_float(card.get('upvote_ratio')),
         'num_comments': as_int(card.get('comment_count')),
         'over18': 1 if card.get('nsfw') else 0,
-        'is_self': 1 if (card.get('post_type') or '').startswith('self') else 0,
-        'stickied': 0,
+        'is_self': 1 if is_self else 0,
+        'stickied': 1 if card.get('pinned') else 0,
         'selftext': (card.get('preview') or '')[:PREVIEW_CAP],
+        # Deliberately null rather than len(preview). The DOM gives a truncated
+        # teaser, not the body, so reporting its length would assert a post is
+        # short when we simply cannot see the rest of it.
+        'selftext_chars': None,
         'created_utc': card.get('created'),
+
+        'thumbnail': card.get('thumbnail'),
+        'post_hint': post_type or None,
+        'is_video': 1 if post_type == 'video' else 0,
+        'is_gallery': 1 if post_type == 'gallery' else 0,
+        'spoiler': 1 if card.get('spoiler') else 0,
+        'locked': 1 if card.get('locked') else 0,
+        'distinguished': card.get('distinguished'),
+        'author_flair': (card.get('author_flair') or '').strip() or None,
+        'flair_bg': normalise_colour(card.get('flair_bg')),
+        'flair_text_color': normalise_colour(card.get('flair_text_color')),
+        'edited_utc': None,
+        # The feed shows that a post has awards, never how many. 1 here means
+        # "at least one", and is left null rather than 0 when we cannot tell.
+        'total_awards': 1 if card.get('has_award') else None,
     }
 
 
