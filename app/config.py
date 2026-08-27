@@ -28,6 +28,11 @@ def _bool(name, default=False):
     return raw.strip().lower() in ('1', 'true', 'yes', 'on')
 
 
+def _list(name):
+    """Comma-separated env var -> list of non-empty trimmed strings."""
+    return [item.strip() for item in (os.getenv(name) or '').split(',') if item.strip()]
+
+
 # The shared SQLite file. Both the api and worker containers mount the volume
 # that holds it, which is why WAL mode in db.py is not optional.
 DB_PATH = os.getenv('DB_PATH', str(BASE_DIR / 'data' / 'portal.db'))
@@ -65,4 +70,53 @@ REDDIT_USERNAME = os.getenv('REDDIT_USERNAME')
 REDDIT_PASSWORD = os.getenv('REDDIT_PASSWORD')
 REDDIT_USER_AGENT = os.getenv(
     'REDDIT_USER_AGENT', 'python:scraping-defense-lab:v0.2 (by /u/unknown)'
+)
+
+# --------------------------------------------------------------- webshare
+# A transport toggle, deliberately independent of SCRAPE_BACKEND: 'how we
+# fetch' (browser vs api) and 'where we exit' (direct vs Webshare) are
+# separate axes, so all four combinations are reachable.
+#
+# Only the browser backend consumes this. The OAuth API path is sanctioned
+# access over credentials - putting a proxy in front of it buys nothing and
+# only adds a way for it to break.
+WEBSHARE_ENABLED = _bool('WEBSHARE_ENABLED', False)
+
+# Dashboard -> API -> Keys. Not the proxy password; this reads the proxy list.
+WEBSHARE_API_TOKEN = os.getenv('WEBSHARE_API_TOKEN')
+
+WEBSHARE_API_BASE = os.getenv('WEBSHARE_API_BASE', 'https://proxy.webshare.io/api/v2')
+
+# 'direct' gives one host:port per proxy, which is what per-community rotation
+# needs. 'backbone' routes everything through one gateway and picks the exit
+# itself, which would make the pool below pointless.
+WEBSHARE_LIST_MODE = os.getenv('WEBSHARE_LIST_MODE', 'direct')
+
+# Optional ISO-3166 filter, e.g. 'US,GB'. Empty means whatever the plan has.
+WEBSHARE_COUNTRIES = _list('WEBSHARE_COUNTRIES')
+
+# Upper bound on how many proxies to pull. Webshare pages at 100.
+WEBSHARE_MAX_PROXIES = _int('WEBSHARE_MAX_PROXIES', 100)
+
+# How long a fetched list stays good. Webshare rotates the underlying IPs on
+# their own schedule, so a worker running for days must re-read eventually.
+WEBSHARE_LIST_TTL_MINUTES = _int('WEBSHARE_LIST_TTL_MINUTES', 60)
+
+# How long an exit IP sits out after it earns a block page. The whole point of
+# a pool is that a burned IP stops being handed out for a while.
+WEBSHARE_COOLDOWN_MINUTES = _int('WEBSHARE_COOLDOWN_MINUTES', 30)
+
+# Attempts per community before a block is treated as final. With a pool, one
+# block means 'that exit IP is burned', not 'the sweep is over' - but it must
+# still terminate, or a fully-burned pool would spin forever.
+WEBSHARE_MAX_ATTEMPTS = _int('WEBSHARE_MAX_ATTEMPTS', 3)
+
+# 'community' takes a fresh exit IP (and a fresh browser context, so a fresh
+# cookie jar) per subreddit. 'sweep' keeps one for the whole run.
+WEBSHARE_ROTATE = os.getenv('WEBSHARE_ROTATE', 'community')
+
+# Answers with the caller's IP as plain text. Used by --check to prove that
+# traffic actually leaves through the proxy rather than around it.
+WEBSHARE_EGRESS_CHECK_URL = os.getenv(
+    'WEBSHARE_EGRESS_CHECK_URL', 'https://ipv4.webshare.io/'
 )

@@ -11,6 +11,9 @@ services:
       SWEEP_INTERVAL_MINUTES: ${SWEEP_INTERVAL_MINUTES:-60}
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
       SESSION_HOURS: ${SESSION_HOURS:-8}
+      # The api never proxies anything; it needs this only to give the right
+      # advice when a sweep comes back blocked. Keep it in step with worker.
+      WEBSHARE_ENABLED: ${WEBSHARE_ENABLED:-false}
       # nginx is the only ingress, so X-Forwarded-For is trustworthy here.
       # Never set this true if the API is exposed directly.
       TRUST_PROXY_HEADERS: "true"
@@ -59,6 +62,16 @@ services:
       REDDIT_USER_AGENT: ${REDDIT_USER_AGENT:-python:scraping-defense-lab:v0.2}
       REDDIT_USERNAME: ${REDDIT_USERNAME:-}
       REDDIT_PASSWORD: ${REDDIT_PASSWORD:-}
+      # Exit-IP transport for the browser backend. Off by default; when on
+      # and misconfigured the worker fails loudly rather than going direct.
+      WEBSHARE_ENABLED: ${WEBSHARE_ENABLED:-false}
+      WEBSHARE_API_TOKEN: ${WEBSHARE_API_TOKEN:-}
+      WEBSHARE_LIST_MODE: ${WEBSHARE_LIST_MODE:-direct}
+      WEBSHARE_COUNTRIES: ${WEBSHARE_COUNTRIES:-}
+      WEBSHARE_ROTATE: ${WEBSHARE_ROTATE:-community}
+      WEBSHARE_MAX_ATTEMPTS: ${WEBSHARE_MAX_ATTEMPTS:-3}
+      WEBSHARE_COOLDOWN_MINUTES: ${WEBSHARE_COOLDOWN_MINUTES:-30}
+      WEBSHARE_LIST_TTL_MINUTES: ${WEBSHARE_LIST_TTL_MINUTES:-60}
     volumes:
       - ./data:/data
     depends_on:

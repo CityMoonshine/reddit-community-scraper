@@ -34,7 +34,8 @@ import time
 from playwright.sync_api import TimeoutError as PlaywrightTimeout
 from playwright.sync_api import sync_playwright
 
-from app.config import PLAYWRIGHT_HEADLESS
+from app.config import (PLAYWRIGHT_HEADLESS, WEBSHARE_MAX_ATTEMPTS,
+                        WEBSHARE_ROTATE)
 from app.db import connection_scope
 from app.ingest.store import upsert_community, upsert_posts
 
@@ -68,6 +69,11 @@ BLOCK_MARKERS = (
     'blocked by network security',
     'whoa there, pardner',
 )
+
+# Chromium will not accept a per-context proxy unless one was declared at
+# launch. This is playwright's documented placeholder for "there will be a
+# proxy, just not this one" - see launch_browser.
+PER_CONTEXT_PROXY = {'server': 'per-context'}
 
 # One pass over the cards currently in the DOM. Runs in the page so a
 # virtualised feed can't recycle a card out from under us mid-iteration.
@@ -136,14 +142,118 @@ def snooze(bounds):
     time.sleep(random.uniform(*bounds))
 
 
-def launch_browser(playwright):
-    """Headed by default. Under Xvfb this still counts as headed."""
-    browser = playwright.chromium.launch(headless=PLAYWRIGHT_HEADLESS)
-    context = browser.new_context(
-        viewport={'width': 1440, 'height': 900},
-        locale='en-US',
-    )
+def launch_browser(playwright, proxy=None):
+    """Headed by default. Under Xvfb this still counts as headed.
+
+    `proxy` is a playwright proxy dict, or the PER_CONTEXT_PROXY sentinel when
+    the caller intends to set a different proxy per context. Chromium needs a
+    proxy declared at launch before per-context proxies work at all, and the
+    sentinel is how you declare one without committing to an address.
+    """
+    launch_kwargs = {'headless': PLAYWRIGHT_HEADLESS}
+
+    if proxy is not None:
+        launch_kwargs['proxy'] = proxy
+
+    browser = playwright.chromium.launch(**launch_kwargs)
+
+    # A launch-level proxy is inherited, so only pass it again when it is a
+    # real address - handing the sentinel to new_context would try to resolve
+    # 'per-context' as a hostname.
+    context = new_context(browser, proxy if proxy is not PER_CONTEXT_PROXY else None)
+
     return browser, context
+
+
+def new_context(browser, proxy=None):
+    """A fresh context, optionally on its own exit IP.
+
+    Rotating the context alongside the proxy is not incidental: a context
+    carries the cookie jar and storage, so reusing one across exit IPs means
+    the same Reddit session identifier arriving from two different countries -
+    which is a louder signal than either half on its own.
+    """
+    kwargs = {
+        'viewport': {'width': 1440, 'height': 900},
+        'locale': 'en-US',
+    }
+
+    if proxy is not None:
+        kwargs['proxy'] = proxy
+
+    return browser.new_context(**kwargs)
+
+
+class BrowserSession:
+    """The browser, its current context/page, and the exit IP behind them.
+
+    This exists so a sweep loop can say "give me a page" without caring whether
+    there is a proxy pool underneath. With no pool it is exactly what the code
+    did before Webshare existed: one browser, one context, one page, reused for
+    the whole run.
+    """
+
+    def __init__(self, playwright, proxy_pool=None):
+        self.pool = proxy_pool
+        self.endpoint = None
+        self.page = None
+
+        self.browser, self.context = launch_browser(
+            playwright, PER_CONTEXT_PROXY if proxy_pool else None
+        )
+
+        if proxy_pool:
+            # The context launch_browser built has no exit assigned yet; the
+            # first rotate replaces it, so only one is ever live at a time.
+            self.rotate()
+        else:
+            self.page = self.context.new_page()
+
+    @property
+    def label(self):
+        return self.endpoint.label if self.endpoint else None
+
+    def rotate(self):
+        """Fresh exit IP, fresh context, fresh page. No-op without a pool."""
+        if not self.pool:
+            return
+
+        self.endpoint = self.pool.acquire()
+        self._replace_context(self.endpoint.playwright_proxy())
+
+        print(f'[webshare] exiting via {self.endpoint.label}', flush=True)
+
+    def retire(self, reason='block page'):
+        """Burn the current exit and move to another one."""
+        if not self.pool:
+            return
+
+        self.pool.penalize(self.endpoint, reason)
+        self.rotate()
+
+    def next_community(self):
+        """Called between communities; rotates only if configured to.
+
+        Per-community rotation is the default because a single exit walking
+        through twenty subreddits back to back is the pattern that got the
+        original IP filtered in the first place.
+        """
+        if self.pool and WEBSHARE_ROTATE == 'community':
+            self.rotate()
+
+    def _replace_context(self, proxy):
+        if self.context is not None:
+            self.context.close()
+
+        self.context = new_context(self.browser, proxy)
+        self.page = self.context.new_page()
+
+    def close(self):
+        try:
+            if self.context is not None:
+                self.context.close()
+        finally:
+            self.browser.close()
 
 
 def listing_url(subreddit, sort, time_filter):
@@ -229,8 +339,21 @@ def classify_response(status_code, body):
     return 'ok'
 
 
-def block_message(status_code):
+def block_message(status_code, exit_label=None):
     detail = f'HTTP {status_code}' if status_code else 'a block page'
+
+    if exit_label:
+        # Different advice, because the diagnosis is different: one blocked
+        # exit says nothing about the next one, so "switch backends" would be
+        # premature. Only a pool that is blocked all the way through means
+        # what an unproxied block means.
+        return (
+            f'Reddit refused the request ({detail}) through {exit_label}. That '
+            f'exit IP is burned - it goes on cooldown and the next attempt '
+            f'comes from another. If every exit in the pool comes back the '
+            f'same way, the pool itself is filtered: widen the plan, change '
+            f'WEBSHARE_COUNTRIES, or fall back to SCRAPE_BACKEND=api.'
+        )
 
     return (
         f'Reddit refused the request ({detail}). On a VPS this is almost always '
@@ -242,7 +365,7 @@ def block_message(status_code):
 
 
 def browse_subreddit(page, subreddit, sort='new', limit=50, time_filter='week',
-                     on_progress=None):
+                     on_progress=None, exit_label=None):
     """Open the listing and scroll it, harvesting after every step.
 
     Returns (community_dict_or_None, [post rows]).
@@ -259,7 +382,8 @@ def browse_subreddit(page, subreddit, sort='new', limit=50, time_filter='week',
             on_progress(text)
 
     url = listing_url(subreddit, sort, time_filter)
-    print(f'  opening {url}', flush=True)
+    via = f' via {exit_label}' if exit_label else ''
+    print(f'  opening {url}{via}', flush=True)
 
     response = page.goto(url, wait_until='domcontentloaded', timeout=60000)
 
@@ -269,7 +393,7 @@ def browse_subreddit(page, subreddit, sort='new', limit=50, time_filter='week',
     verdict = classify_response(status_code, body)
 
     if verdict == 'blocked':
-        raise BlockedError(block_message(status_code))
+        raise BlockedError(block_message(status_code, exit_label))
 
     if verdict == 'missing':
         report(f'r/{subreddit}: private, banned, or does not exist (HTTP {status_code})')
@@ -325,6 +449,45 @@ def browse_subreddit(page, subreddit, sort='new', limit=50, time_filter='week',
     return community, rows
 
 
+def browse_with_retry(session, subreddit, sort='new', limit=50,
+                      time_filter='week', on_progress=None, max_attempts=None):
+    """browse_subreddit, except a block page rotates the exit and tries again.
+
+    Without a pool this is a single attempt and BlockedError propagates
+    untouched - a block on the machine's only IP is not retryable, and
+    retrying it would only make the same failure slower.
+
+    A pool that runs out mid-retry is reported as a BlockedError too. It is the
+    same outcome from the caller's point of view (every route to Reddit is
+    refused) and it keeps 'blocked aborts the sweep' as one rule rather than
+    two.
+    """
+    from app.ingest.webshare import NoProxyAvailable
+
+    attempts = (max_attempts or WEBSHARE_MAX_ATTEMPTS) if session.pool else 1
+
+    for attempt in range(1, attempts + 1):
+        try:
+            return browse_subreddit(
+                session.page, subreddit, sort, limit, time_filter,
+                on_progress=on_progress, exit_label=session.label,
+            )
+        except BlockedError as exc:
+            print(f'  {exc}', flush=True)
+
+            if attempt == attempts:
+                raise
+
+            if on_progress:
+                on_progress(f'r/{subreddit}: blocked, rotating exit IP '
+                            f'(attempt {attempt + 1} of {attempts})')
+
+            try:
+                session.retire(f'blocked on r/{subreddit}')
+            except NoProxyAvailable as exhausted:
+                raise BlockedError(str(exhausted)) from exhausted
+
+
 def community_row(meta):
     """browse_subreddit metadata -> the dict upsert_community wants."""
     return {
@@ -350,6 +513,12 @@ def main():
     parser.add_argument('--time-filter', default='week', choices=TIME_FILTERS)
     parser.add_argument('--limit', type=int, default=100)
     parser.add_argument('--dry-run', action='store_true')
+    parser.add_argument('--webshare', dest='webshare', action='store_true',
+                        default=None,
+                        help='Force routing through Webshare exits, whatever '
+                             'WEBSHARE_ENABLED says.')
+    parser.add_argument('--no-webshare', dest='webshare', action='store_false',
+                        help='Force a direct connection instead.')
     args = parser.parse_args()
 
     subreddits = [s.strip().lstrip('r/').strip('/') for s in args.subreddits.split(',')]
@@ -358,9 +527,20 @@ def main():
     if not subreddits:
         parser.error('No usable subreddit names in --subreddits')
 
+    from app.ingest.webshare import WebshareError
+    from app.ingest.webshare import pool as build_pool
+
+    try:
+        proxy_pool = build_pool(args.webshare)
+    except WebshareError as exc:
+        print(f'\n{exc}\n', file=sys.stderr)
+        return 1
+
+    if proxy_pool:
+        print(proxy_pool.describe(), flush=True)
+
     with sync_playwright() as playwright:
-        browser, context = launch_browser(playwright)
-        page = context.new_page()
+        session = BrowserSession(playwright, proxy_pool)
 
         try:
             for index, subreddit in enumerate(subreddits):
@@ -368,10 +548,11 @@ def main():
 
                 if index:
                     snooze(SUBREDDIT_PAUSE)
+                    session.next_community()
 
                 try:
-                    meta, posts = browse_subreddit(
-                        page, subreddit, args.sort, args.limit, args.time_filter
+                    meta, posts = browse_with_retry(
+                        session, subreddit, args.sort, args.limit, args.time_filter
                     )
                 except BlockedError as exc:
                     print(f'\n{exc}', file=sys.stderr)
@@ -390,7 +571,7 @@ def main():
 
                 print(f'  {new} new, {refreshed} refreshed', flush=True)
         finally:
-            browser.close()
+            session.close()
 
     return 0
 

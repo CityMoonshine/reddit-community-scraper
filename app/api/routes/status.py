@@ -9,7 +9,8 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter
 
-from app.config import QUEUE_POLL_SECONDS, SCRAPE_BACKEND, SWEEP_INTERVAL_MINUTES
+from app.config import (QUEUE_POLL_SECONDS, SCRAPE_BACKEND,
+                        SWEEP_INTERVAL_MINUTES, WEBSHARE_ENABLED)
 from app.db import connection_scope
 
 router = APIRouter(prefix='/api')
@@ -149,11 +150,22 @@ def status():
 
     for row in failing:
         if row['status'] == 'blocked':
+            # Two different diagnoses share this status, and the useful advice
+            # differs: unproxied means "this one IP is filtered", proxied means
+            # "every exit we tried is filtered", which is a much bigger claim.
+            if WEBSHARE_ENABLED:
+                remedy = ("every Webshare exit tried was refused. Widen the "
+                          "plan, change WEBSHARE_COUNTRIES, or fall back to "
+                          "SCRAPE_BACKEND=api.")
+            else:
+                remedy = ("on a VPS this is usually the datacenter IP, not the "
+                          "browser - route through Webshare "
+                          "(WEBSHARE_ENABLED=true) or try SCRAPE_BACKEND=api.")
+
             alerts.append({
                 'level': 'error',
-                'text': f"r/{row['community_name']}: Reddit served a block page. "
-                        f"On a VPS this is usually the datacenter IP, not the "
-                        f"browser - try SCRAPE_BACKEND=api.",
+                'text': f"r/{row['community_name']}: Reddit served a block "
+                        f"page. {remedy}",
             })
         else:
             alerts.append({
@@ -181,5 +193,6 @@ def status():
             'sweep_interval_minutes': SWEEP_INTERVAL_MINUTES,
             'queue_poll_seconds': QUEUE_POLL_SECONDS,
             'default_backend': SCRAPE_BACKEND,
+            'webshare_enabled': WEBSHARE_ENABLED,
         },
     }

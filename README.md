@@ -54,6 +54,60 @@ Worth knowing, since it's the subject of this repo:
 | **Headless** Chromium on `reddit.com` | "You've been blocked by network security" |
 | **Headed** Chromium | loads normally |
 
+## Routing through Webshare
+
+The block page above is an **IP-reputation decision Reddit makes before it looks
+at the browser** — so no amount of making Chromium more convincing clears it.
+Only a different exit IP does. `app/ingest/webshare.py` supplies those.
+
+It's a *transport*, not a backend, and the two axes stay separate:
+`SCRAPE_BACKEND` picks **how** we fetch (browser vs OAuth), `WEBSHARE_ENABLED`
+picks **where we exit from**. All four combinations are reachable — though only
+the browser path consumes the proxy, since the OAuth path is credentialed
+access and gains nothing from one.
+
+```bash
+WEBSHARE_ENABLED=true
+WEBSHARE_API_TOKEN=...        # dashboard → API → Keys, not the proxy password
+```
+
+```bash
+python -m app.ingest.webshare --list      # what the plan has
+python -m app.ingest.webshare --check     # prove traffic exits through it
+python -m app.ingest.webshare --rotate 8  # which exit the pool hands out next
+python -m app.ingest.browser --subreddits python --webshare
+```
+
+`--check` is the one worth running first: "the proxy is configured" and
+"traffic actually leaves through it" are different claims, and it tests the
+second by comparing each proxy's egress IP against your direct one. Same IP
+means the connection is **leaking around** the proxy — reported as a failure,
+because it looks like success everywhere else.
+
+**The pool.** Proxies are read via the API in `direct` mode, one host:port each,
+cached for an hour. `backbone` mode is deliberately unsupported: it routes
+everything through one gateway and picks the exit itself, so you can't tell
+which exit was blocked, and cooldown stops meaning anything.
+
+- **A block costs one exit, not the sweep.** The blocked IP goes on cooldown for
+  30 minutes and the subreddit is retried from another, up to
+  `WEBSHARE_MAX_ATTEMPTS`. Only when every attempt is refused does the sweep
+  abort — same as before.
+- **The exit and the cookie jar rotate together**, per subreddit. Reusing a
+  browser context across exits would send one Reddit session identifier from two
+  countries, which is louder than either half alone.
+- **An exit that just worked is forgiven**, so a one-off block doesn't retire a
+  good IP for half an hour.
+
+**It fails loudly and never falls back.** If `WEBSHARE_ENABLED=true` and the
+credentials are wrong, the worker says so at startup and sweeps fail. A silent
+fallback to direct is the worst outcome on the table: the VPS IP shows up at
+Reddit while the dashboard says "proxied", and the symptom is indistinguishable
+from the proxy simply not helping.
+
+Turn it off and the code path is what it was before this module existed — one
+browser, one context, one page, no proxy argument anywhere.
+
 ## Ingest — OAuth API (alternative)
 
 `reddit_ingest.py` takes the sanctioned route. Same CLI, same tables, and it

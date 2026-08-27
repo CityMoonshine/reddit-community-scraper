@@ -21,7 +21,7 @@ import traceback
 from datetime import datetime, timedelta, timezone
 
 from app.config import (QUEUE_POLL_SECONDS, SCRAPE_BACKEND, STALE_RUN_MINUTES,
-                        SWEEP_INTERVAL_MINUTES)
+                        SWEEP_INTERVAL_MINUTES, WEBSHARE_ENABLED)
 from app.db import connection_scope, wait_for_schema
 from app.ingest.store import upsert_community, upsert_posts
 from app.worker import status
@@ -221,18 +221,31 @@ def store_result(run_id, community_row_data, posts):
 # -------------------------------------------------------------------- sweeps
 
 def sweep_browser(run_id, communities):
-    """One Chromium window for the whole sweep, reused across communities."""
+    """One Chromium window for the whole sweep, reused across communities.
+
+    When WEBSHARE_ENABLED is on, the window's context (and with it the exit IP
+    and the cookie jar) rotates per community, and a block page costs that one
+    exit rather than the whole sweep. Off, this is unchanged.
+    """
     from playwright.sync_api import sync_playwright
 
     from app.ingest.browser import (SUBREDDIT_PAUSE, BlockedError,
-                                    browse_subreddit, community_row,
-                                    launch_browser, snooze)
+                                    BrowserSession, browse_with_retry,
+                                    community_row, snooze)
+    from app.ingest.webshare import pool as build_pool
 
     total_new = total_refreshed = checked = 0
 
+    # Deliberately before the browser launch: a misconfigured pool should fail
+    # the run with a Webshare message, not with whatever Chromium says when it
+    # cannot reach a proxy.
+    proxy_pool = build_pool()
+
+    if proxy_pool:
+        print(proxy_pool.describe(), flush=True)
+
     with sync_playwright() as playwright:
-        browser, context = launch_browser(playwright)
-        page = context.new_page()
+        session = BrowserSession(playwright, proxy_pool)
 
         try:
             for index, community in enumerate(communities):
@@ -240,22 +253,27 @@ def sweep_browser(run_id, communities):
 
                 if index:
                     snooze(SUBREDDIT_PAUSE)
+                    session.next_community()
 
                 print(f"\nr/{name} ({community['monitor_sort']})", flush=True)
-                status.sweeping(run_id, name, f'opening r/{name}')
+                via = f' via {session.label}' if session.label else ''
+                status.sweeping(run_id, name, f'opening r/{name}{via}')
 
                 try:
-                    meta, posts = browse_subreddit(
-                        page, name,
+                    meta, posts = browse_with_retry(
+                        session, name,
                         community['monitor_sort'] or 'new',
                         community['monitor_limit'] or 50,
                         on_progress=status.activity,
                     )
                 except BlockedError:
-                    # Blocked is about the IP, not this subreddit - every
-                    # remaining fetch would hit the same wall.
+                    # Blocked is about the IP, not this subreddit. With a pool
+                    # that has already meant every exit we were willing to try;
+                    # without one it means the only IP we have. Either way,
+                    # every remaining fetch would hit the same wall.
                     record_item(run_id, community['id'], name, 'blocked',
-                                error='Reddit block page')
+                                error='Reddit block page'
+                                      + (f' ({session.label})' if session.label else ''))
                     raise
                 except Exception as exc:
                     print(f'  r/{name}: {exc}', flush=True)
@@ -278,8 +296,13 @@ def sweep_browser(run_id, communities):
                 checked += 1
 
                 print(f'  {new} new, {refreshed} refreshed', flush=True)
+
+                # An exit that just delivered a listing is not burned, so drop
+                # any cooldown it picked up earlier in the run.
+                if proxy_pool:
+                    proxy_pool.forgive(session.endpoint)
         finally:
-            browser.close()
+            session.close()
 
     return checked, total_new, total_refreshed
 
@@ -400,6 +423,7 @@ def run_once(backend=None, community=None):
     """Queue a sweep and run it immediately, for CLI use."""
     reap_orphaned_runs()
     backend = backend or SCRAPE_BACKEND
+    preflight_webshare(backend)
     only_id = None
 
     if community:
@@ -422,6 +446,42 @@ def run_once(backend=None, community=None):
 
 
 # ------------------------------------------------------------------ schedule
+
+def preflight_webshare(backend):
+    """Read the proxy list once at startup, so a bad token is visible now.
+
+    Without this the first symptom of a missing or rotated API token is a sweep
+    that fails an hour later, which reads on the dashboard as "Reddit blocked
+    us" - the opposite of what happened.
+    """
+    if not WEBSHARE_ENABLED or backend != 'browser':
+        return True
+
+    from app.ingest.webshare import WebshareError
+    from app.ingest.webshare import pool as build_pool
+
+    try:
+        built = build_pool()
+        print(f'[webshare] {built.describe()}', flush=True)
+        return True
+    except WebshareError as exc:
+        print('', flush=True)
+        print('=' * 70, flush=True)
+        print('WEBSHARE IS ENABLED BUT UNUSABLE', flush=True)
+        print(f'  {exc}', flush=True)
+        print('', flush=True)
+        print('  Sweeps will fail rather than fall back to a direct', flush=True)
+        print('  connection - going direct unannounced would put the VPS IP', flush=True)
+        print('  in front of Reddit while the dashboard said "proxied".', flush=True)
+        print('', flush=True)
+        print('  Fix the credentials, or set WEBSHARE_ENABLED=false to go', flush=True)
+        print('  direct on purpose. To check from inside the container:', flush=True)
+        print('      docker compose exec worker python -m app.ingest.webshare --check',
+              flush=True)
+        print('=' * 70, flush=True)
+        print('', flush=True)
+        return False
+
 
 def loop(interval_minutes, backend):
     from apscheduler.schedulers.blocking import BlockingScheduler
@@ -471,10 +531,13 @@ def loop(interval_minutes, backend):
     )
 
     status.self_check()
+    preflight_webshare(backend)
     reap_orphaned_runs()
     status.started(backend)
 
-    print(f'Worker up. Sweeps {description}, backend={backend}. '
+    transport = 'webshare' if WEBSHARE_ENABLED else 'direct'
+
+    print(f'Worker up. Sweeps {description}, backend={backend} via {transport}. '
           f'Queue polled every {QUEUE_POLL_SECONDS}s.', flush=True)
 
     try:
