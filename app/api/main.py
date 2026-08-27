@@ -23,6 +23,7 @@ from app.api.routes import communities as community_routes
 from app.api.routes import debug as debug_routes
 from app.api.routes import monitor as monitor_routes
 from app.api.routes import posts as post_routes
+from app.api.routes import status as status_routes
 from app.db import connection_scope
 from app.schema import init_db
 
@@ -32,7 +33,9 @@ app = FastAPI(title='Scraping Defense API', docs_url='/api/docs', openapi_url='/
 init_db()
 
 # Viewing the log shouldn't write to the log.
-UNLOGGED_PREFIXES = ('/api/debug', '/api/health')
+# /api/status is polled every few seconds by every open dashboard; logging
+# it would bury real traffic in the RequestLog the detection views replay.
+UNLOGGED_PREFIXES = ('/api/debug', '/api/health', '/api/status')
 
 
 def write_request_log(session_id, method, path, status_code, latency_ms,
@@ -98,4 +101,5 @@ app.include_router(auth_routes.router)
 app.include_router(post_routes.router)
 app.include_router(community_routes.router)
 app.include_router(monitor_routes.router)
+app.include_router(status_routes.router)
 app.include_router(debug_routes.router)

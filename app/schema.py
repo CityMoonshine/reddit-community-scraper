@@ -194,6 +194,24 @@ SCHEMA = {
         );
     ''',
 
+    # A single row the worker overwrites. Without it a dead worker is
+    # indistinguishable from an idle one on the dashboard: runs just sit in
+    # 'queued' forever and nothing on screen says why.
+    'WorkerStatus': '''
+        CREATE TABLE IF NOT EXISTS WorkerStatus (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            last_heartbeat_at TEXT,
+            state TEXT DEFAULT 'unknown',
+            backend TEXT,
+            current_run_id INTEGER,
+            current_community TEXT,
+            activity TEXT,
+            next_sweep_at TEXT,
+            started_at TEXT,
+            last_error TEXT
+        );
+    ''',
+
     'MonitorRunItems': '''
         CREATE TABLE IF NOT EXISTS MonitorRunItems (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -214,6 +232,7 @@ INDEXES = (
     'CREATE INDEX IF NOT EXISTS idx_posts_community_score ON Posts (community_id, score DESC);',
     'CREATE INDEX IF NOT EXISTS idx_posts_first_seen ON Posts (first_seen_at DESC);',
     'CREATE INDEX IF NOT EXISTS idx_runitems_run ON MonitorRunItems (run_id);',
+    'CREATE INDEX IF NOT EXISTS idx_runitems_community ON MonitorRunItems (community_id, id DESC);',
     'CREATE INDEX IF NOT EXISTS idx_requestlog_session ON RequestLog (session_id);',
 )
 
@@ -261,6 +280,11 @@ def init_db(seed=True):
 
         cursor.execute('UPDATE Posts SET first_seen_at = fetched_at WHERE first_seen_at IS NULL;')
         cursor.execute('UPDATE MonitorRuns SET queued_at = started_at WHERE queued_at IS NULL;')
+
+        # The single WorkerStatus row must exist before either side reads it.
+        cursor.execute(
+            "INSERT OR IGNORE INTO WorkerStatus (id, state) VALUES (1, 'never started');"
+        )
 
         for statement in INDEXES:
             cursor.execute(statement)

@@ -24,6 +24,7 @@ from app.config import (QUEUE_POLL_SECONDS, SCRAPE_BACKEND, STALE_RUN_MINUTES,
                         SWEEP_INTERVAL_MINUTES)
 from app.db import connection_scope, wait_for_schema
 from app.ingest.store import upsert_community, upsert_posts
+from app.worker import status
 
 
 def utcnow():
@@ -118,7 +119,7 @@ def claim_run():
         ).fetchone()
 
 
-def finish_run(run_id, status, checked, new, refreshed, error=None):
+def finish_run(run_id, outcome, checked, new, refreshed, error=None):
     with connection_scope() as connection:
         connection.execute(
             """
@@ -127,11 +128,11 @@ def finish_run(run_id, status, checked, new, refreshed, error=None):
                 posts_new = ?, posts_refreshed = ?, error = ?
             WHERE id = ?;
             """,
-            (utcnow(), status, checked, new, refreshed, error, run_id),
+            (utcnow(), outcome, checked, new, refreshed, error, run_id),
         )
 
 
-def record_item(run_id, community_id, name, status, new=0, refreshed=0, error=None):
+def record_item(run_id, community_id, name, item_status, new=0, refreshed=0, error=None):
     with connection_scope() as connection:
         connection.execute(
             """
@@ -140,7 +141,7 @@ def record_item(run_id, community_id, name, status, new=0, refreshed=0, error=No
                 posts_new, posts_refreshed, error
             ) VALUES (?, ?, ?, ?, ?, ?, ?);
             """,
-            (run_id, community_id, name, status, new, refreshed, error),
+            (run_id, community_id, name, item_status, new, refreshed, error),
         )
 
 
@@ -212,12 +213,14 @@ def sweep_browser(run_id, communities):
                     snooze(SUBREDDIT_PAUSE)
 
                 print(f"\nr/{name} ({community['monitor_sort']})", flush=True)
+                status.sweeping(run_id, name, f'opening r/{name}')
 
                 try:
                     meta, posts = browse_subreddit(
                         page, name,
                         community['monitor_sort'] or 'new',
                         community['monitor_limit'] or 50,
+                        on_progress=status.activity,
                     )
                 except BlockedError:
                     # Blocked is about the IP, not this subreddit - every
@@ -264,6 +267,7 @@ def sweep_api(run_id, communities):
         for community in communities:
             name = community['name']
             print(f"\nr/{name} ({community['monitor_sort']})", flush=True)
+            status.sweeping(run_id, name, f'fetching r/{name} via the OAuth API')
 
             try:
                 meta = fetch_community(client, name)
@@ -312,11 +316,16 @@ def execute_run(run):
     if not communities:
         reason = 'community not found' if only_id else 'nothing is being monitored'
         finish_run(run_id, 'ok', 0, 0, 0, error=reason)
+        status.idle(last_error=reason)
         print(f'Run {run_id}: {reason}.', flush=True)
         return
 
     scope = f"r/{communities[0]['name']}" if only_id else f'{len(communities)} communities'
     print(f'Run {run_id}: {scope} via {backend}', flush=True)
+
+    # NB: never name a local `status` in this function - it would shadow the
+    # imported status module for the whole body, including the calls above it.
+    status.sweeping(run_id, None, f'starting {scope} via {backend}')
 
     try:
         sweep = sweep_browser if backend == 'browser' else sweep_api
@@ -324,12 +333,15 @@ def execute_run(run):
     except Exception as exc:
         traceback.print_exc()
         finish_run(run_id, 'failed', 0, 0, 0, str(exc)[:400])
+        status.idle(last_error=str(exc)[:400])
         return
 
-    status = 'ok' if checked == len(communities) else 'partial'
-    finish_run(run_id, status, checked, new, refreshed)
+    outcome = 'ok' if checked == len(communities) else 'partial'
+    finish_run(run_id, outcome, checked, new, refreshed)
+    status.idle(last_error=None if outcome == 'ok' else
+                f'{len(communities) - checked} of {len(communities)} communities failed')
 
-    print(f'\nRun {run_id} {status}: {checked}/{len(communities)} checked, '
+    print(f'\nRun {run_id} {outcome}: {checked}/{len(communities)} checked, '
           f'{new} new, {refreshed} refreshed', flush=True)
 
 
@@ -407,8 +419,19 @@ def loop(interval_minutes, backend):
         misfire_grace_time=300,
     )
 
+    def next_sweep_at():
+        job = scheduler.get_job('enqueue_sweep')
+        return job.next_run_time.isoformat() if job and job.next_run_time else None
+
+    def tick():
+        # Heartbeat first: if the sweep below runs long, the dashboard still
+        # sees a recent beat from before it started, and the sweep itself
+        # keeps the row fresh through status.sweeping/activity.
+        status.heartbeat(next_sweep_at())
+        process_queue()
+
     scheduler.add_job(
-        process_queue,
+        tick,
         trigger=IntervalTrigger(seconds=QUEUE_POLL_SECONDS),
         id='process_queue',
         # A sweep runs far longer than the poll interval; without this
@@ -416,6 +439,8 @@ def loop(interval_minutes, backend):
         max_instances=1,
         coalesce=True,
     )
+
+    status.started(backend)
 
     print(f'Worker up. Sweeps {description}, backend={backend}. '
           f'Queue polled every {QUEUE_POLL_SECONDS}s.', flush=True)

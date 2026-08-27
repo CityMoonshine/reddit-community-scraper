@@ -199,20 +199,30 @@ def parse_card(card):
     }
 
 
-def browse_subreddit(page, subreddit, sort='new', limit=50, time_filter='week'):
+def browse_subreddit(page, subreddit, sort='new', limit=50, time_filter='week',
+                     on_progress=None):
     """Open the listing and scroll it, harvesting after every step.
 
     Returns (community_dict_or_None, [post rows]).
     Raises BlockedError if Reddit served an interstitial - the caller should
     treat that as fatal for the whole sweep, not just this subreddit.
+
+    on_progress(text) is called as the scroll proceeds so the worker can put
+    live progress on the dashboard. A sweep is slow enough that "it is doing
+    something" needs to be observable, not inferred.
     """
+    def report(text):
+        print(f'  {text}', flush=True)
+        if on_progress:
+            on_progress(text)
+
     url = listing_url(subreddit, sort, time_filter)
     print(f'  opening {url}', flush=True)
 
     response = page.goto(url, wait_until='domcontentloaded', timeout=60000)
 
     if response and response.status >= 400:
-        print(f'  r/{subreddit}: HTTP {response.status}', flush=True)
+        report(f'r/{subreddit}: HTTP {response.status}')
         return None, []
 
     body = page.inner_text('body')[:400].lower() if page.locator('body').count() else ''
@@ -225,13 +235,13 @@ def browse_subreddit(page, subreddit, sort='new', limit=50, time_filter='week'):
         )
 
     if 'this community is private' in body or 'been banned' in body:
-        print(f'  r/{subreddit}: private or banned', flush=True)
+        report(f'r/{subreddit}: private or banned')
         return None, []
 
     try:
         page.wait_for_selector('shreddit-post', timeout=30000)
     except PlaywrightTimeout:
-        print(f'  r/{subreddit}: no posts rendered (does it exist?)', flush=True)
+        report(f'r/{subreddit}: no posts rendered (does it exist?)')
         return None, []
 
     # Let the first screenful settle before reading anything.
@@ -256,6 +266,8 @@ def browse_subreddit(page, subreddit, sort='new', limit=50, time_filter='week'):
         gained = len(posts) - before
         dry = 0 if gained else dry + 1
 
+        report(f'r/{subreddit}: {len(posts)}/{limit} posts harvested')
+
         if len(posts) >= limit:
             break
 
@@ -267,7 +279,7 @@ def browse_subreddit(page, subreddit, sort='new', limit=50, time_filter='week'):
         snooze(SCROLL_PAUSE)
 
     rows = list(posts.values())[:limit]
-    print(f'  r/{subreddit}: {len(rows)} posts collected', flush=True)
+    report(f'r/{subreddit}: {len(rows)} posts collected')
 
     return community, rows
 

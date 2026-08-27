@@ -235,3 +235,67 @@ button:disabled { opacity: .55; cursor: not-allowed; }
 .banner.error { background: #fdecea; color: #a32020; }
 
 .backlink { display: inline-block; margin-bottom: .8rem; color: var(--brand); font-size: .85rem; }
+
+/* ------------------------------------------------------------- status */
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: .4rem;
+  padding: .2rem .6rem;
+  border-radius: 12px;
+  font-size: .76rem;
+  background: rgba(255, 255, 255, .14);
+  color: #fff;
+  white-space: nowrap;
+}
+
+.chip .dot { width: 7px; height: 7px; border-radius: 50%; background: #cfe0f0; }
+.chip.good .dot { background: #56d364; }
+.chip.busy .dot { background: #e3b341; animation: pulse 1.2s ease-in-out infinite; }
+.chip.bad { background: #a32020; }
+.chip.bad .dot { background: #fff; }
+
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+
+.status-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1px;
+  background: var(--line);
+  border-radius: 4px;
+  overflow: hidden;
+  margin-bottom: 1rem;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, .1);
+}
+
+.stat { background: #fff; padding: .7rem 1rem; flex: 1 1 150px; min-width: 150px; }
+
+.stat-label {
+  font-size: .68rem;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+  color: var(--muted);
+  margin-bottom: .2rem;
+}
+
+.stat-value { font-size: 1rem; font-weight: 600; }
+.stat .muted { margin-top: .15rem; }
+
+.alerts { margin-bottom: 1rem; }
+.alerts .banner { margin-bottom: .5rem; }
+.alerts .banner:last-child { margin-bottom: 0; }
+.banner.warn { background: #fff4e0; color: #8a5a00; }
+
+/* --------------------------------------------------- expandable runs */
+
+tr.clickable { cursor: pointer; }
+tr.clickable:hover td { background: #fbfcfd; }
+.caret { display: inline-block; width: .9rem; color: var(--muted); }
+tr.detail-row td { background: #fafbfc; padding: 0; }
+.detail-cell { padding: .9rem 1.1rem !important; }
+.detail-cell .banner { margin-bottom: .8rem; }
+
+table.inner { background: #fff; border: 1px solid var(--line); border-radius: 3px; }
+table.inner th { background: #f4f6f8; font-size: .68rem; }
+table.inner td, table.inner th { padding: .4rem .6rem; font-size: .82rem; }

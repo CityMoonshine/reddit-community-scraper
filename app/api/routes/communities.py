@@ -48,8 +48,18 @@ def list_communities():
                   WHERE p.community_id = c.id
                     AND p.first_seen_at >= datetime('now', '-1 day')) AS new_24h,
                 (SELECT MAX(p.first_seen_at) FROM Posts p
-                  WHERE p.community_id = c.id) AS newest_at
+                  WHERE p.community_id = c.id) AS newest_at,
+                last_item.status AS last_status,
+                last_item.error AS last_error,
+                last_item.run_id AS last_run_id
             FROM Communities c
+            LEFT JOIN (
+                SELECT i.* FROM MonitorRunItems i
+                WHERE i.id IN (
+                    SELECT MAX(id) FROM MonitorRunItems
+                    WHERE community_id IS NOT NULL GROUP BY community_id
+                )
+            ) AS last_item ON last_item.community_id = c.id
             ORDER BY c.monitor_enabled DESC, c.name COLLATE NOCASE;
             '''
         ).fetchall()

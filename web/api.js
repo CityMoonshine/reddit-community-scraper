@@ -51,6 +51,7 @@ export const api = {
   toggleCommunity: (community_id) => request('/communities/toggle', body({ community_id })),
   removeCommunity: (community_id) => request('/communities/remove', body({ community_id })),
 
+  status: () => request('/status'),
   runs: () => request('/runs'),
   runDetail: (id) => request(`/runs/${id}`),
   queueRun: (backend, community_id = null) => request('/runs', body({ backend, community_id })),
