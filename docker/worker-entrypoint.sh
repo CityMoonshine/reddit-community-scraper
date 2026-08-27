@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 #
-# Two jobs, in order:
+# Three jobs, in order:
 #
-#   1. As root: make the /data bind mount writable by pwuser, then drop
-#      privileges. The mount's ownership comes from the host, so fixing it
-#      here beats asking the operator to chown by hand on every VPS.
-#   2. As pwuser: bring up a virtual X display and exec the command inside it.
+#   1. As root: make the /data bind mount usable by the service user. See
+#      shared-data.sh for why this is a shared *group*, not an ownership grab.
+#   2. Drop privileges to pwuser, taking a correct HOME with us - setpriv
+#      changes the uid but not the environment, and Chromium dies with SIGTRAP
+#      if HOME still points at root-owned /root.
+#   3. Bring up a virtual X display and exec the command inside it.
 #      Chromium is genuinely headed, it just draws into Xvfb's framebuffer.
 #
 # Xvfb is started directly rather than via `xvfb-run`. xvfb-run waits for a
@@ -17,19 +19,20 @@
 #
 set -euo pipefail
 
+# shellcheck source=/dev/null
+. /usr/local/lib/shared-data.sh
+
 RUN_USER="${RUN_USER:-pwuser}"
 XVFB_DISPLAY="${XVFB_DISPLAY:-99}"
 XVFB_SCREEN="${XVFB_SCREEN:-1440x900x24}"
 
 if [ "$(id -u)" = "0" ]; then
-    mkdir -p /data
-    chown -R "${RUN_USER}:${RUN_USER}" /data 2>/dev/null || true
+    prepare_data_dir
 
     # setpriv changes the uid but does NOT touch the environment, so HOME
     # would still say /root - which is 0700 root-owned. Chromium then fails to
     # write its profile and crashpad dir and dies with SIGTRAP, while the same
-    # launch works fine under `docker exec` because that runs as root. Set the
-    # target user's environment explicitly before dropping.
+    # launch works fine under `docker exec` because that runs as root.
     home="$(getent passwd "${RUN_USER}" | cut -d: -f6)"
     export HOME="${home}"
     export USER="${RUN_USER}"
@@ -42,10 +45,13 @@ if [ "$(id -u)" = "0" ]; then
     uid="$(id -u "${RUN_USER}")"
     gid="$(id -g "${RUN_USER}")"
 
-    # Re-exec this same script as the unprivileged user, which then takes the
-    # branch below. Keeping Chromium's sandbox is why we don't just stay root.
+    # --init-groups is what picks up the shared APP_GID membership granted in
+    # the Dockerfile; without it the supplementary group is dropped here and
+    # /data goes read-only again.
     exec setpriv --reuid="${uid}" --regid="${gid}" --init-groups "$0" "$@"
 fi
+
+assert_data_writable || exit 1
 
 # A hard restart can leave these behind and Xvfb then refuses the display.
 rm -f "/tmp/.X${XVFB_DISPLAY}-lock" "/tmp/.X11-unix/X${XVFB_DISPLAY}" 2>/dev/null || true
@@ -73,7 +79,7 @@ if [ ! -e "/tmp/.X11-unix/X${XVFB_DISPLAY}" ]; then
 fi
 
 export DISPLAY=":${XVFB_DISPLAY}"
-echo "[entrypoint] Xvfb ready, DISPLAY=${DISPLAY}; exec: $*"
+echo "[entrypoint] Xvfb ready, DISPLAY=${DISPLAY}; running as $(id -un) $(id -G)"
 
 # Tear Xvfb down with us, so a restart doesn't leave an orphan holding :99.
 trap 'kill ${XVFB_PID} 2>/dev/null || true' EXIT

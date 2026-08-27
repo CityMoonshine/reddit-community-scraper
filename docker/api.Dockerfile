@@ -18,6 +18,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app ./app
 COPY docker/api-entrypoint.sh /usr/local/bin/api-entrypoint
+COPY docker/shared-data.sh /usr/local/lib/shared-data.sh
 RUN chmod +x /usr/local/bin/api-entrypoint
 
 # uid 1000 so it matches the worker and both can write the shared volume.
