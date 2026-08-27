@@ -69,6 +69,15 @@ services:
     # Playwright recommends.
     ipc: host
     restart: unless-stopped
+    # The worker's failure mode is hanging, not crashing - a wedged entrypoint
+    # reports "Up" forever. Health is defined as a fresh heartbeat, so a hung
+    # worker shows as unhealthy in `docker compose ps` instead of looking fine.
+    healthcheck:
+      test: ["CMD", "python", "-m", "app.worker.healthcheck"]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+      retries: 3
 
 # The SQLite file lives in ./data on the host, shared by api and worker.
 # A bind mount rather than a named volume so you can back it up, copy it off,
