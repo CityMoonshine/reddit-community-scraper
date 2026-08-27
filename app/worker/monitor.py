@@ -85,6 +85,35 @@ def enqueue_run(trigger, backend, only_community_id=None):
         return cursor.lastrowid
 
 
+def reap_orphaned_runs():
+    """Fail any run still marked 'running' at worker startup.
+
+    Only the worker executes runs, so if one is 'running' when the worker is
+    starting, nothing is executing it - the container was restarted or killed
+    mid-sweep. Without this the one-sweep-at-a-time guard refuses every new
+    run until STALE_RUN_MINUTES elapses, which means a container restart can
+    silently wedge sweeps for the better part of an hour.
+    """
+    with connection_scope() as connection:
+        cursor = connection.cursor()
+        cursor.execute(
+            """
+            UPDATE MonitorRuns
+            SET status = 'failed',
+                finished_at = ?,
+                error = 'interrupted - worker restarted mid-sweep'
+            WHERE status = 'running';
+            """,
+            (utcnow(),),
+        )
+        count = cursor.rowcount
+
+    if count:
+        print(f'[startup] reaped {count} run(s) orphaned by a restart', flush=True)
+
+    return count
+
+
 def claim_run():
     """Atomically take the oldest queued run. Returns the row, or None."""
     with connection_scope() as connection:
@@ -369,6 +398,7 @@ def resolve_community(name):
 
 def run_once(backend=None, community=None):
     """Queue a sweep and run it immediately, for CLI use."""
+    reap_orphaned_runs()
     backend = backend or SCRAPE_BACKEND
     only_id = None
 
@@ -441,6 +471,7 @@ def loop(interval_minutes, backend):
     )
 
     status.self_check()
+    reap_orphaned_runs()
     status.started(backend)
 
     print(f'Worker up. Sweeps {description}, backend={backend}. '

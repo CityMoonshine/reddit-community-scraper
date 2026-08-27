@@ -199,6 +199,48 @@ def parse_card(card):
     }
 
 
+def classify_response(status_code, body):
+    """'ok' | 'blocked' | 'missing' | 'error' for a listing page load.
+
+    Split out because getting this wrong is expensive. A 403 reported as
+    "no data" reads as "that subreddit is empty", when it actually means every
+    future request will fail the same way. Blocked has to be distinguishable
+    from missing, because only one of them is worth changing the backend over.
+    """
+    body = (body or '').lower()
+
+    if any(marker in body for marker in BLOCK_MARKERS):
+        return 'blocked'
+
+    # 403 on a public listing is an access decision about the client, not about
+    # the subreddit. 429 is the rate limiter saying the same thing politely.
+    if status_code in (403, 429):
+        return 'blocked'
+
+    if status_code == 404:
+        return 'missing'
+
+    if 'this community is private' in body or 'been banned' in body:
+        return 'missing'
+
+    if status_code is not None and status_code >= 400:
+        return 'error'
+
+    return 'ok'
+
+
+def block_message(status_code):
+    detail = f'HTTP {status_code}' if status_code else 'a block page'
+
+    return (
+        f'Reddit refused the request ({detail}). On a VPS this is almost always '
+        f'the datacenter IP being filtered rather than anything about the '
+        f'browser, and it will not clear on its own. Switch to the sanctioned '
+        f'API: set SCRAPE_BACKEND=api in .env, add Reddit app credentials, and '
+        f'restart the worker.'
+    )
+
+
 def browse_subreddit(page, subreddit, sort='new', limit=50, time_filter='week',
                      on_progress=None):
     """Open the listing and scroll it, harvesting after every step.
@@ -221,21 +263,20 @@ def browse_subreddit(page, subreddit, sort='new', limit=50, time_filter='week',
 
     response = page.goto(url, wait_until='domcontentloaded', timeout=60000)
 
-    if response and response.status >= 400:
-        report(f'r/{subreddit}: HTTP {response.status}')
-        return None, []
-
+    status_code = response.status if response else None
     body = page.inner_text('body')[:400].lower() if page.locator('body').count() else ''
 
-    if any(marker in body for marker in BLOCK_MARKERS):
-        raise BlockedError(
-            'Reddit served a block page. On a VPS this is usually the '
-            'datacenter IP being filtered, not the browser fingerprint - '
-            'try SCRAPE_BACKEND=api.'
-        )
+    verdict = classify_response(status_code, body)
 
-    if 'this community is private' in body or 'been banned' in body:
-        report(f'r/{subreddit}: private or banned')
+    if verdict == 'blocked':
+        raise BlockedError(block_message(status_code))
+
+    if verdict == 'missing':
+        report(f'r/{subreddit}: private, banned, or does not exist (HTTP {status_code})')
+        return None, []
+
+    if verdict == 'error':
+        report(f'r/{subreddit}: HTTP {status_code}')
         return None, []
 
     try:
