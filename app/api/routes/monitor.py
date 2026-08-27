@@ -12,6 +12,8 @@ router = APIRouter(prefix='/api')
 
 class RunBody(BaseModel):
     backend: str = SCRAPE_BACKEND
+    # None sweeps every monitored community; an id sweeps just that one.
+    community_id: int | None = None
 
 
 @router.get('/runs')
@@ -20,9 +22,11 @@ def list_runs(limit: int = Query(10, ge=1, le=100)):
         runs = connection.execute(
             '''
             SELECT r.*,
+                   c.name AS only_community_name,
                    (SELECT COUNT(*) FROM MonitorRunItems i
                      WHERE i.run_id = r.id AND i.status != 'ok') AS failed_items
             FROM MonitorRuns r
+            LEFT JOIN Communities c ON c.id = r.only_community_id
             ORDER BY r.id DESC
             LIMIT ?;
             ''',
@@ -103,14 +107,26 @@ def queue_run(body: RunBody):
                 status_code=409,
             )
 
+        target = None
+
+        if body.community_id is not None:
+            target = cursor.execute(
+                'SELECT id, name FROM Communities WHERE id = ?;', (body.community_id,)
+            ).fetchone()
+
+            if target is None:
+                return JSONResponse({'detail': 'No such community.'}, status_code=404)
+
         cursor.execute(
             '''
-            INSERT INTO MonitorRuns (trigger, backend, queued_at, status)
-            VALUES ('manual', ?, datetime('now'), 'queued');
+            INSERT INTO MonitorRuns (trigger, backend, queued_at, status, only_community_id)
+            VALUES ('manual', ?, datetime('now'), 'queued', ?);
             ''',
-            (backend,),
+            (backend, target['id'] if target else None),
         )
         run_id = cursor.lastrowid
 
+    scope = f"r/{target['name']}" if target else 'all monitored communities'
+
     return {'run_id': run_id,
-            'detail': 'Sweep queued. The worker picks it up within a few seconds.'}
+            'detail': f'Sweep queued for {scope}. The worker picks it up within a few seconds.'}

@@ -53,7 +53,7 @@ export const api = {
 
   runs: () => request('/runs'),
   runDetail: (id) => request(`/runs/${id}`),
-  queueRun: (backend) => request('/runs', body({ backend })),
+  queueRun: (backend, community_id = null) => request('/runs', body({ backend, community_id })),
   discoveries: () => request('/discoveries'),
 
   debugSessions: () => request('/debug/sessions'),

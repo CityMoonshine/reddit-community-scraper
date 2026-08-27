@@ -231,7 +231,7 @@ function monitorView() {
           const result = await api.queueRun(runData.default_backend);
           setBanner('notice', result.detail);
         }),
-      }, active ? `Sweep ${active.status}…` : 'Run sweep now'),
+      }, active ? `Sweep ${active.status}…` : 'Sweep all now'),
       h('span', { class: 'muted' },
         `Scheduled every ${runData.interval_minutes} minutes via the worker container.`
         + ` Backend: ${runData.default_backend}.`),
@@ -250,6 +250,14 @@ function monitorView() {
       h('td', { class: 'num' }, num(c.new_24h)),
       h('td', { class: 'muted nowrap' }, ago(c.last_checked_at)),
       h('td', { class: 'nowrap' },
+        h('button', {
+          class: 'ghost', disabled: !!active,
+          title: 'Sweep just this community now — runs even if paused',
+          onclick: () => guard(async () => {
+            const result = await api.queueRun(runData.default_backend, c.id);
+            setBanner('notice', result.detail);
+          }),
+        }, 'Sweep'),
         h('button', {
           class: 'ghost',
           onclick: () => guard(async () => { await api.toggleCommunity(c.id); render(); }),
@@ -276,6 +284,8 @@ function monitorView() {
       h('td', {}, `#${r.id}`),
       h('td', { class: 'muted nowrap' }, when(r.started_at || r.queued_at)),
       h('td', {}, r.trigger),
+      h('td', { class: 'nowrap' },
+        r.only_community_name ? `r/${r.only_community_name}` : 'all'),
       h('td', {}, r.backend),
       h('td', {}, pill(r.status, r.status)),
       h('td', { class: 'num' }, r.communities_checked),
@@ -288,12 +298,12 @@ function monitorView() {
     const runTable = h('table', {},
       h('thead', {}, h('tr', {},
         h('th', {}, '#'), h('th', {}, 'Started'), h('th', {}, 'Trigger'),
-        h('th', {}, 'Backend'), h('th', {}, 'Status'),
+        h('th', {}, 'Scope'), h('th', {}, 'Backend'), h('th', {}, 'Status'),
         h('th', { class: 'num' }, 'Checked'), h('th', { class: 'num' }, 'New'),
         h('th', { class: 'num' }, 'Refreshed'), h('th', {}, 'Notes'),
       )),
       h('tbody', {}, runRows.length ? runRows : h('tr', {}, h('td', {
-        colspan: '9', class: 'empty',
+        colspan: '10', class: 'empty',
       }, 'No sweeps yet.'))),
     );
 

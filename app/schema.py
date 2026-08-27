@@ -189,6 +189,7 @@ SCHEMA = {
             communities_checked INTEGER DEFAULT 0,
             posts_new INTEGER DEFAULT 0,
             posts_refreshed INTEGER DEFAULT 0,
+            only_community_id INTEGER,
             error TEXT
         );
     ''',
@@ -234,6 +235,8 @@ MIGRATIONS = {
     ],
     'MonitorRuns': [
         ('queued_at', 'TEXT'),
+        # NULL means "every monitored community" - the scheduled case.
+        ('only_community_id', 'INTEGER'),
     ],
 }
 

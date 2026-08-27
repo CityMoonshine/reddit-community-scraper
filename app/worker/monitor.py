@@ -56,7 +56,7 @@ def reap_stale_runs(connection):
     return cursor.rowcount
 
 
-def enqueue_run(trigger, backend):
+def enqueue_run(trigger, backend, only_community_id=None):
     """Queue a sweep. Returns the run id, or None if one is already pending.
 
     Coalescing matters for the cron trigger: if a sweep overruns its slot we
@@ -74,10 +74,11 @@ def enqueue_run(trigger, backend):
 
         cursor.execute(
             """
-            INSERT INTO MonitorRuns (trigger, backend, queued_at, status)
-            VALUES (?, ?, ?, 'queued');
+            INSERT INTO MonitorRuns (trigger, backend, queued_at, status,
+                                     only_community_id)
+            VALUES (?, ?, ?, 'queued', ?);
             """,
-            (trigger, backend, utcnow()),
+            (trigger, backend, utcnow(), only_community_id),
         )
 
         return cursor.lastrowid
@@ -143,8 +144,22 @@ def record_item(run_id, community_id, name, status, new=0, refreshed=0, error=No
         )
 
 
-def monitored_communities():
+def communities_for_run(only_community_id=None):
+    """What this run should sweep.
+
+    A manual single-community trigger deliberately ignores monitor_enabled: if
+    you explicitly asked for this one, you want it fetched, paused or not.
+    """
     with connection_scope() as connection:
+        if only_community_id:
+            return connection.execute(
+                """
+                SELECT id, name, monitor_sort, monitor_limit
+                FROM Communities WHERE id = ?;
+                """,
+                (only_community_id,),
+            ).fetchall()
+
         return connection.execute(
             """
             SELECT id, name, monitor_sort, monitor_limit
@@ -288,14 +303,20 @@ def execute_run(run):
     run_id = run['id']
     backend = run['backend'] or SCRAPE_BACKEND
 
-    communities = monitored_communities()
+    # sqlite3.Row has no .get(), and the column is absent on rows written
+    # before the migration added it.
+    only_id = run['only_community_id'] if 'only_community_id' in run.keys() else None
+
+    communities = communities_for_run(only_id)
 
     if not communities:
-        finish_run(run_id, 'ok', 0, 0, 0, error='nothing is being monitored')
-        print(f'Run {run_id}: nothing monitored.', flush=True)
+        reason = 'community not found' if only_id else 'nothing is being monitored'
+        finish_run(run_id, 'ok', 0, 0, 0, error=reason)
+        print(f'Run {run_id}: {reason}.', flush=True)
         return
 
-    print(f'Run {run_id}: {len(communities)} communities via {backend}', flush=True)
+    scope = f"r/{communities[0]['name']}" if only_id else f'{len(communities)} communities'
+    print(f'Run {run_id}: {scope} via {backend}', flush=True)
 
     try:
         sweep = sweep_browser if backend == 'browser' else sweep_api
@@ -323,10 +344,33 @@ def process_queue():
     return run['id']
 
 
-def run_once(backend=None):
+def resolve_community(name):
+    """Look up a community by name for the CLI's --community flag."""
+    with connection_scope() as connection:
+        row = connection.execute(
+            'SELECT id, name FROM Communities WHERE name = ? COLLATE NOCASE;',
+            (name.strip().lstrip('r/').strip('/'),),
+        ).fetchone()
+
+    return row
+
+
+def run_once(backend=None, community=None):
     """Queue a sweep and run it immediately, for CLI use."""
     backend = backend or SCRAPE_BACKEND
-    run_id = enqueue_run('manual', backend)
+    only_id = None
+
+    if community:
+        row = resolve_community(community)
+
+        if row is None:
+            print(f'No community named {community!r}. Add it on the dashboard '
+                  f'first, or check the spelling.', flush=True)
+            return None
+
+        only_id = row['id']
+
+    run_id = enqueue_run('manual', backend, only_id)
 
     if run_id is None:
         print('A sweep is already queued or running.', flush=True)
@@ -388,7 +432,13 @@ def main():
     parser.add_argument('--loop', action='store_true')
     parser.add_argument('--interval', type=int, default=SWEEP_INTERVAL_MINUTES)
     parser.add_argument('--backend', default=SCRAPE_BACKEND, choices=('browser', 'api'))
+    parser.add_argument('--community', default=None,
+                        help='Sweep only this subreddit (implies --once). '
+                             'Runs even if the community is paused.')
     args = parser.parse_args()
+
+    if args.community and not args.loop:
+        args.once = True
 
     if not args.once and not args.loop:
         parser.error('Pass --once or --loop')
@@ -400,7 +450,7 @@ def main():
     if args.loop:
         loop(args.interval, args.backend)
     else:
-        run_once(args.backend)
+        run_once(args.backend, args.community)
 
     return 0
 
