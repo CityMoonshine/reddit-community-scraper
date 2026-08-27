@@ -59,7 +59,8 @@ def table_exists(connection, name):
     return row is not None
 
 
-def wait_for_schema(tables=('Users', 'Communities', 'Posts', 'MonitorRuns'),
+def wait_for_schema(tables=('Users', 'Communities', 'Posts', 'MonitorRuns',
+                            'WorkerStatus'),
                     timeout=60, interval=1.0):
     """Block until the API container has created the schema.
 

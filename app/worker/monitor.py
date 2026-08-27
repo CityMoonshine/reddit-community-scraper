@@ -440,6 +440,7 @@ def loop(interval_minutes, backend):
         coalesce=True,
     )
 
+    status.self_check()
     status.started(backend)
 
     print(f'Worker up. Sweeps {description}, backend={backend}. '

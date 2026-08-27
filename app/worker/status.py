@@ -92,3 +92,54 @@ def read():
     """The current row, or None. Used by the API."""
     with connection_scope() as connection:
         return connection.execute('SELECT * FROM WorkerStatus WHERE id = 1;').fetchone()
+
+
+def self_check():
+    """Prove a status write actually lands, and explain it loudly if not.
+
+    Every write in this module swallows its own errors so a status problem can
+    never kill a working sweep. The cost of that is a silent failure mode: the
+    worker runs fine, the dashboard says "offline" forever, and nothing
+    connects the two. This is called once at startup to make that case obvious
+    in the logs.
+    """
+    try:
+        with connection_scope() as connection:
+            row = connection.execute(
+                'SELECT last_heartbeat_at FROM WorkerStatus WHERE id = 1;'
+            ).fetchone()
+
+            if row is None:
+                connection.execute(
+                    "INSERT OR IGNORE INTO WorkerStatus (id, state) VALUES (1, 'starting');"
+                )
+
+        before = utcnow()
+        _touch()
+
+        with connection_scope() as connection:
+            after = connection.execute(
+                'SELECT last_heartbeat_at FROM WorkerStatus WHERE id = 1;'
+            ).fetchone()
+
+        if after is None or not after['last_heartbeat_at']:
+            raise RuntimeError('the heartbeat write did not land')
+
+        print(f'[status] heartbeat write verified at {before}', flush=True)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        print('', flush=True)
+        print('=' * 70, flush=True)
+        print('WORKER CANNOT RECORD ITS STATUS', flush=True)
+        print(f'  {type(exc).__name__}: {exc}', flush=True)
+        print('', flush=True)
+        print('  Sweeps may still run, but the dashboard will show this worker', flush=True)
+        print('  as OFFLINE no matter what it is doing.', flush=True)
+        print('', flush=True)
+        print('  Most likely: the api container is running older code and has', flush=True)
+        print('  not created the WorkerStatus table. Rebuild both together:', flush=True)
+        print('      docker compose up -d --build', flush=True)
+        print('  Failing that, check /data is writable by uid 1000.', flush=True)
+        print('=' * 70, flush=True)
+        print('', flush=True)
+        return False
