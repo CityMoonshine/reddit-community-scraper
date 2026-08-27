@@ -266,11 +266,46 @@ Sign in at `/login` with any seeded username and `password123` (the usernames
 print during `createDb.py`). Posts live at `/records`; the monitoring dashboard
 is at `/monitor`.
 
-The SPA is set as an editorial page: the feed is a numbered ranking with a
-headline, byline and standfirst, and the AI verdict sits where a pull-quote
-would. Serif for anything you read, letterspaced uppercase sans for anything you
-scan. It follows the OS light/dark preference; the palette swaps but the
-typography does not.
+The SPA is set as an editorial page: a dateline under the masthead, a lead
+story on page one, then a numbered ranking with headline, byline and
+standfirst, with the AI verdict where a pull-quote would sit. Serif for
+anything you read, letterspaced uppercase sans for anything you scan. It
+follows the OS light/dark preference; the palette swaps but the typography
+does not.
+
+### The charts
+
+Hand-rolled SVG in `web/app.js` — a charting library would be the largest
+dependency in a project that has none, to draw three shapes. `/api/insights`
+serves every aggregate in one round trip so the charts and the status strip
+can never disagree about how many posts exist.
+
+Two encoding rules are load-bearing:
+
+- **A one-hue ramp is only for ordered categories.** Score buckets and Reddit
+  score bands are ordered, so they get the ramp. Days, communities and request
+  hours are not, so every bar there is the same colour — shading those by value
+  would encode magnitude twice and spend the only free channel on what bar
+  length already says.
+- **Text never wears the data colour.** Marks carry identity; values and labels
+  stay in ink.
+
+The ramp was validated rather than eyeballed — monotone lightness, ≥0.06 ΔL
+between steps, palest step ≥2:1 on the surface, hue spread under 5°, in both
+light and dark. The two palest steps sit under 3:1, so every chart ships a
+direct peak label and a hover tooltip and repeats its numbers in a table below.
+
+**Time granularity follows the data.** A portal that has been collecting for a
+day has every post inside one daily bucket; charted by day that is thirteen
+empty columns and one spike, which reads as "nothing is happening" when the
+opposite is true. Under three days of history the discovery series switches to
+hourly over 48 hours, where the sweep rhythm is actually visible, and the client
+reads the label off `granularity` rather than assuming days.
+
+Before anything has been scored, the distribution panel plots **Reddit's** score
+distribution and says so in the heading. An empty panel teaches nothing; one
+that quietly passed Reddit's numbers off as the rubric's would be worse than
+empty.
 
 ## Schema
 

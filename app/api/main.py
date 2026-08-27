@@ -21,6 +21,7 @@ from app.api.auth import session_id_from_request
 from app.api.routes import auth as auth_routes
 from app.api.routes import communities as community_routes
 from app.api.routes import debug as debug_routes
+from app.api.routes import insights as insight_routes
 from app.api.routes import monitor as monitor_routes
 from app.api.routes import posts as post_routes
 from app.api.routes import scoring as scoring_routes
@@ -103,5 +104,6 @@ app.include_router(post_routes.router)
 app.include_router(community_routes.router)
 app.include_router(monitor_routes.router)
 app.include_router(status_routes.router)
+app.include_router(insight_routes.router)
 app.include_router(scoring_routes.router)
 app.include_router(debug_routes.router)

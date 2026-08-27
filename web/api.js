@@ -57,6 +57,8 @@ export const api = {
   queueRun: (backend, community_id = null) => request('/runs', body({ backend, community_id })),
   discoveries: () => request('/discoveries'),
 
+  insights: (days = 14) => request(`/insights?days=${days}`),
+
   scoring: () => request('/scoring'),
   saveRubric: (data) => request('/scoring', body(data)),
   activateRubric: (prompt_id) => request('/scoring/activate', body({ prompt_id })),

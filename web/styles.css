@@ -646,3 +646,327 @@ table.inner td, table.inner th { padding: .4rem .6rem; font-size: .78rem; }
   .headline { font-size: 1.12rem; }
   .thumb { width: 64px; height: 64px; margin-left: .8rem; }
 }
+
+/* ===================================================================== charts
+ *
+ * The ramp below is a SINGLE HUE stepped light -> dark, validated with the
+ * data-viz ordinal checks (monotone lightness, >=0.06 dL between steps, palest
+ * step >=2:1 against the surface, hue spread under 5deg). It is used ONLY on
+ * the score buckets, which are genuinely ordered. Nominal series - days,
+ * communities, request hours - all use --series, one colour for every mark:
+ * shading those by value would encode magnitude twice and burn the only free
+ * channel on what bar length already says.
+ *
+ * The two palest steps sit under 3:1 on the surface, so the relief rule
+ * applies - every chart here ships a direct peak label and a hover tooltip,
+ * and the same numbers appear in the tables further down each page.
+ */
+
+:root {
+  --series: #ab4535;
+  --ramp-0: #dc9e8f;
+  --ramp-1: #c57060;
+  --ramp-2: #ab4535;
+  --ramp-3: #89261b;
+  --ramp-4: #63100b;
+  --chart-grid: #ded7cc;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    /* The dark column is the same hue re-stepped for the dark surface, not an
+     * inverted copy: on dark, more-is-brighter, so the ramp runs the other way. */
+    --series: #cd6f5c;
+    --ramp-0: #93412f;
+    --ramp-1: #b25546;
+    --ramp-2: #cd6f5c;
+    --ramp-3: #e4907c;
+    --ramp-4: #f5b8a8;
+    --chart-grid: #35302a;
+  }
+}
+
+.panel-grid {
+  display: grid;
+  grid-template-columns: 1.6fr 1fr 0.9fr;
+  gap: 1px;
+  background: var(--rule);
+  border: 1px solid var(--rule);
+  margin-bottom: 1.6rem;
+}
+
+.detection-grid { grid-template-columns: 2fr 1fr; }
+
+.rubric-grid {
+  display: grid;
+  grid-template-columns: 1.7fr 1fr;
+  gap: 1.4rem;
+  align-items: start;
+}
+
+.panel { border: none; padding: 1.1rem 1.2rem 1rem; background: var(--paper-raised); }
+
+.panel-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 1rem;
+  font-size: .62rem;
+  text-transform: uppercase;
+  letter-spacing: .14em;
+  font-weight: 700;
+  color: var(--ink-soft);
+  margin-bottom: .9rem;
+  padding-bottom: .5rem;
+  border-bottom: 1px solid var(--rule);
+}
+
+.panel-head .muted { text-transform: none; letter-spacing: 0; font-weight: 400; }
+
+.panel-foot {
+  display: flex;
+  gap: 1.1rem;
+  flex-wrap: wrap;
+  margin-top: .8rem;
+  padding-top: .6rem;
+  border-top: 1px solid var(--rule);
+  font-size: .6rem;
+  text-transform: uppercase;
+  letter-spacing: .1em;
+  color: var(--ink-faint);
+}
+
+.panel-foot b {
+  font-family: var(--serif);
+  font-size: .85rem;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--ink);
+}
+
+.chart-wrap { position: relative; }
+.chart { width: 100%; height: auto; display: block; overflow: visible; }
+
+/* Marks carry the data colour; nothing else does. */
+.chart-bar { fill: var(--series); }
+.chart-bar.ramp-0 { fill: var(--ramp-0); }
+.chart-bar.ramp-1 { fill: var(--ramp-1); }
+.chart-bar.ramp-2 { fill: var(--ramp-2); }
+.chart-bar.ramp-3 { fill: var(--ramp-3); }
+.chart-bar.ramp-4 { fill: var(--ramp-4); }
+
+/* Recessive: hairline, solid, one step off the surface. Never dashed. */
+.chart-axis { stroke: var(--chart-grid); stroke-width: 1; }
+
+/* The hit target is the whole band - a one-post day is a sliver nobody can
+ * hover, and an unhoverable mark is an undiscoverable value. */
+.chart-hit { fill: transparent; cursor: crosshair; }
+.chart-hit:hover { fill: var(--ink); fill-opacity: .045; }
+
+.chart-peak {
+  position: absolute;
+  top: -2px;
+  right: 0;
+  font-size: .56rem;
+  text-transform: uppercase;
+  letter-spacing: .12em;
+  font-weight: 700;
+  color: var(--ink-faint);
+}
+
+.chart-labels {
+  display: flex;
+  justify-content: space-between;
+  font-size: .55rem;
+  text-transform: uppercase;
+  letter-spacing: .08em;
+  color: var(--ink-faint);
+  margin-top: .25rem;
+}
+
+.chart-labels .hidden { visibility: hidden; }
+
+.chart-tip {
+  position: fixed;
+  z-index: 40;
+  display: none;
+  pointer-events: none;
+  background: var(--ink);
+  color: var(--paper);
+  padding: .4rem .6rem;
+  font-size: .72rem;
+  line-height: 1.4;
+  font-family: var(--sans);
+  box-shadow: 0 2px 12px rgba(0, 0, 0, .22);
+}
+
+.chart-tip b { font-family: var(--serif); font-size: .92rem; }
+
+/* Horizontal magnitude bars, nominal categories - one colour throughout. */
+.bar-rows { display: flex; flex-direction: column; gap: .5rem; }
+
+.bar-row {
+  display: grid;
+  grid-template-columns: 8.5rem 1fr 2.6rem;
+  align-items: center;
+  gap: .6rem;
+  font-size: .72rem;
+}
+
+.bar-label {
+  color: var(--ink-soft);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.bar-track { background: var(--stock); height: 9px; display: block; }
+.bar-fill { display: block; height: 100%; background: var(--series); border-radius: 0 4px 4px 0; }
+
+.bar-value {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+  font-weight: 600;
+}
+
+/* Sparkline: 2px line, end-dot with a surface ring so it stays legible where
+ * it crosses the line or the cell border. */
+.spark { display: block; overflow: visible; }
+
+.spark-line {
+  fill: none;
+  stroke: var(--series);
+  stroke-width: 2;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
+.spark-dot { fill: var(--series); stroke: var(--paper-raised); stroke-width: 2; }
+.spark-cell { width: 96px; }
+
+/* A headline number. Not a one-bar bar chart. */
+.figures { display: flex; flex-direction: column; justify-content: center; gap: 1.1rem; }
+.figure-value { font-family: var(--serif); font-size: 1.9rem; font-weight: 600; line-height: 1; }
+
+.figure-label {
+  font-size: .56rem;
+  text-transform: uppercase;
+  letter-spacing: .14em;
+  font-weight: 700;
+  color: var(--ink-faint);
+  margin-top: .25rem;
+}
+
+.figure-note { font-size: .68rem; color: var(--ink-faint); margin-top: .1rem; }
+
+/* ------------------------------------------------------------- the dateline */
+
+.dateline {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 1rem;
+  padding: .35rem 2rem;
+  border-bottom: 1px solid var(--rule);
+  font-size: .58rem;
+  text-transform: uppercase;
+  letter-spacing: .16em;
+  font-weight: 600;
+  color: var(--ink-faint);
+  background: var(--paper);
+}
+
+.dateline-mid { color: var(--ink-soft); }
+
+/* --------------------------------------------------------- the lead story */
+
+.lead {
+  border-top: 3px double var(--rule-heavy);
+  border-bottom: 1px solid var(--rule);
+  padding: 1.6rem 0 1.7rem;
+}
+
+.lead-kicker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .5rem;
+  align-items: center;
+  font-size: .62rem;
+  text-transform: uppercase;
+  letter-spacing: .13em;
+  font-weight: 700;
+  color: var(--ink-faint);
+  margin-bottom: .6rem;
+}
+
+.lead-rank {
+  background: var(--rule-heavy);
+  color: var(--paper);
+  padding: .12rem .5rem;
+  letter-spacing: .16em;
+}
+
+.lead-kicker .community { color: var(--accent); }
+.lead-kicker .sep { color: var(--rule); }
+
+.lead-headline {
+  font-family: var(--serif);
+  font-size: 2.3rem;
+  line-height: 1.1;
+  font-weight: 700;
+  letter-spacing: -.022em;
+  margin: 0 0 .7rem;
+  max-width: 24ch;
+}
+
+.lead-headline a { color: var(--ink); text-decoration: none; }
+.lead-headline a:hover { color: var(--accent); }
+
+.lead-standfirst {
+  font-family: var(--serif);
+  font-size: 1.05rem;
+  line-height: 1.55;
+  color: var(--ink-soft);
+  max-width: 58ch;
+  margin: 0 0 1rem;
+}
+
+.lead-foot { display: flex; gap: 2.5rem; flex-wrap: wrap; align-items: flex-start; }
+
+.lead-verdict {
+  display: flex;
+  gap: .9rem;
+  align-items: flex-start;
+  border-left: 2px solid var(--accent);
+  padding-left: 1rem;
+  flex: 1 1 24rem;
+}
+
+.lead-verdict.pending {
+  border-left-color: var(--rule);
+  flex-direction: column;
+  gap: .2rem;
+}
+
+/* .verdict-text carries `flex: 1 1 20rem` for the row layout it was written
+ * for. In this column variant the main axis is vertical, so that basis becomes
+ * a 20rem HEIGHT and the pending verdict grows a 320px column of white space
+ * with a rule down the side of it. Reset it to content height here. */
+.lead-verdict.pending .verdict-text { flex: 0 1 auto; }
+
+.lead-score {
+  font-family: var(--serif);
+  font-size: 2.4rem;
+  font-weight: 700;
+  line-height: .9;
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 980px) {
+  .panel-grid, .detection-grid, .rubric-grid { grid-template-columns: 1fr; }
+  .lead-headline { font-size: 1.7rem; max-width: none; }
+  .dateline { padding: .35rem 1.2rem; }
+  .dateline-mid { display: none; }
+}

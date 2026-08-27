@@ -92,6 +92,193 @@ async function guard(fn) {
   }
 }
 
+// ------------------------------------------------------------------ charts
+//
+// Hand-rolled SVG. A charting library would be the largest dependency in a
+// project that otherwise has none, to draw three shapes.
+//
+// Two encoding rules are load-bearing and easy to get wrong:
+//
+//   1. A one-hue ramp is only correct on ORDERED categories. Score buckets are
+//      ordered, so they get the ramp. Days and communities are not ordered by
+//      magnitude, so every bar is the same colour - shading those by value
+//      would double-encode bar length as hue and spend the only free channel
+//      on information the chart already shows.
+//   2. Text never wears the data colour. The marks carry identity; values and
+//      labels stay in ink.
+//
+// Colours come from CSS custom properties so the night edition swaps with the
+// rest of the page rather than needing its own palette here.
+
+const svgEl = (tag, attrs = {}, ...children) => {
+  const el = document.createElementNS('http://www.w3.org/2000/svg', tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (v === null || v === undefined || v === false) continue;
+    if (k.startsWith('on')) el.addEventListener(k.slice(2).toLowerCase(), v);
+    else el.setAttribute(k, v);
+  }
+  for (const c of children.flat()) {
+    if (c === null || c === undefined || c === false) continue;
+    el.append(c instanceof Node ? c : document.createTextNode(String(c)));
+  }
+  return el;
+};
+
+// A bar whose data-end is rounded and whose baseline end is square. Drawn as a
+// path rather than a rect because rect rounds all four corners.
+function barPath(x, y, w, hgt, r) {
+  const radius = Math.max(0, Math.min(r, hgt, w / 2));
+  if (hgt <= 0) return '';
+  return `M${x},${y + hgt}`
+    + `L${x},${y + radius}`
+    + `Q${x},${y} ${x + radius},${y}`
+    + `L${x + w - radius},${y}`
+    + `Q${x + w},${y} ${x + w},${y + radius}`
+    + `L${x + w},${y + hgt}Z`;
+}
+
+// One shared tooltip element, positioned on hover. One per chart would mean N
+// stray absolutely-positioned nodes outliving the re-render that made them.
+let tipEl = null;
+
+function showTip(event, html) {
+  if (!tipEl) {
+    tipEl = h('div', { class: 'chart-tip' });
+    document.body.append(tipEl);
+  }
+  tipEl.innerHTML = html;
+  tipEl.style.display = 'block';
+  const pad = 14;
+  const rect = tipEl.getBoundingClientRect();
+  let left = event.clientX + pad;
+  if (left + rect.width > window.innerWidth - 8) left = event.clientX - rect.width - pad;
+  tipEl.style.left = `${Math.max(8, left)}px`;
+  tipEl.style.top = `${Math.max(8, event.clientY - rect.height - pad)}px`;
+}
+
+const hideTip = () => { if (tipEl) tipEl.style.display = 'none'; };
+
+// Round a maximum up to something an axis tick can say out loud.
+function niceMax(value) {
+  if (value <= 5) return Math.max(1, value);
+  const mag = 10 ** Math.floor(Math.log10(value));
+  return Math.ceil(value / (mag / 2)) * (mag / 2);
+}
+
+const shortDay = (iso) => {
+  const d = new Date(`${iso}T00:00:00Z`);
+  return Number.isNaN(d.getTime()) ? iso
+    : d.toLocaleDateString(undefined, { day: 'numeric', month: 'short', timeZone: 'UTC' });
+};
+
+/**
+ * Column chart for a single series over time.
+ * `ramp` opts in to the ordinal ramp - only pass it for ordered categories.
+ */
+function columnChart(rows, {
+  labelKey, valueKey, height = 132, ramp = false, tip, tickEvery = 2,
+} = {}) {
+  const values = rows.map((r) => r[valueKey] || 0);
+  const top = niceMax(Math.max(1, ...values));
+  const peak = Math.max(...values);
+
+  // A real coordinate space, scaled uniformly. A 0-100 viewBox stretched to
+  // width would distort the rounded data-ends into ellipses and make the bar
+  // thickness a function of how wide the browser window happens to be.
+  const W = 720, padB = 18, padT = 16;
+  const plot = height - padB - padT;
+  const band = W / Math.max(1, rows.length);
+  // Cap the mark and let the leftover band be air, rather than filling the slot.
+  const barW = Math.min(band * 0.6, 24);
+
+  const svg = svgEl('svg', {
+    class: 'chart', viewBox: `0 0 ${W} ${height}`,
+    role: 'img', 'aria-label': `${rows.length} points, peak ${peak}`,
+  });
+
+  // Baseline only - a hairline, one step off the surface, and no gridlines
+  // above it: the direct label on the peak carries the scale.
+  svg.append(svgEl('line', {
+    class: 'chart-axis', x1: 0, x2: W, y1: height - padB, y2: height - padB,
+  }));
+
+  rows.forEach((row, i) => {
+    const v = row[valueKey] || 0;
+    const hgt = (v / top) * plot;
+    const x = i * band + (band - barW) / 2;
+    const y = padT + (plot - hgt);
+
+    const bar = svgEl('path', {
+      d: barPath(x, y, barW, hgt, 4),
+      class: ramp ? `chart-bar ramp-${Math.min(4, i)}` : 'chart-bar',
+    });
+
+    // The hit target is the whole band, not the bar - a 1-post day is a
+    // sliver, and a sliver is not something anyone can hover.
+    const hit = svgEl('rect', {
+      x: i * band, y: 0, width: band, height, class: 'chart-hit',
+      onmousemove: (e) => showTip(e, tip(row)),
+      onmouseleave: hideTip,
+    });
+
+    svg.append(bar, hit);
+  });
+
+  const labels = h('div', { class: 'chart-labels' },
+    rows.map((row, i) => h('span', {
+      class: i % tickEvery === 0 || i === rows.length - 1 ? '' : 'hidden',
+    }, row[labelKey])));
+
+  return h('div', { class: 'chart-wrap' },
+    // The peak is the one value worth a direct label; the rest live in the
+    // tooltip and in the tables further down the page.
+    h('div', { class: 'chart-peak' }, `peak ${num(peak)}`),
+    svg, labels);
+}
+
+/** Horizontal magnitude bars. Nominal categories - one colour for every bar. */
+function barRows(rows, { labelKey, valueKey, max }) {
+  const top = max || Math.max(1, ...rows.map((r) => r[valueKey] || 0));
+
+  return h('div', { class: 'bar-rows' },
+    rows.map((row) => h('div', { class: 'bar-row' },
+      h('span', { class: 'bar-label' }, row[labelKey]),
+      h('span', { class: 'bar-track' },
+        h('span', {
+          class: 'bar-fill',
+          style: `width: ${Math.max(1.5, ((row[valueKey] || 0) / top) * 100)}%`,
+        })),
+      h('span', { class: 'bar-value' }, num(row[valueKey])),
+    )));
+}
+
+/** Sparkline: one series, 2px, with an end-dot carrying a surface ring. */
+function sparkline(values, { width = 84, height = 22 } = {}) {
+  const top = Math.max(1, ...values);
+  const step = width / Math.max(1, values.length - 1);
+  const y = (v) => height - 3 - (v / top) * (height - 6);
+
+  const points = values.map((v, i) => `${i * step},${y(v)}`).join(' ');
+  const lastX = (values.length - 1) * step;
+  const lastY = y(values[values.length - 1] || 0);
+
+  return svgEl('svg', {
+    class: 'spark', viewBox: `0 0 ${width} ${height}`, width, height,
+    role: 'img', 'aria-label': `${values.length} day trend, latest ${values[values.length - 1] || 0}`,
+  },
+    svgEl('polyline', { class: 'spark-line', points }),
+    svgEl('circle', { class: 'spark-dot', cx: lastX, cy: lastY, r: 2.6 }),
+  );
+}
+
+/** A headline number with a label under it. Not a one-bar bar chart. */
+function statTile(label, value, note) {
+  return h('div', { class: 'figure' },
+    h('div', { class: 'figure-value' }, value),
+    h('div', { class: 'figure-label' }, label),
+    note ? h('div', { class: 'figure-note' }, note) : null);
+}
+
 // ------------------------------------------------------------------ shell
 
 function shell(...content) {
@@ -100,12 +287,26 @@ function shell(...content) {
     class: state.route === id ? 'active' : '',
   }, label);
 
+  const today = new Date().toLocaleDateString(undefined, {
+    weekday: 'long', day: 'numeric', month: 'long', year: 'numeric',
+  });
+
+  const edition = state.status && state.status.last_run
+    ? `No. ${state.status.last_run.id}`
+    : 'No. 1';
+
   return h('div', {},
     h('header', {},
       h('h1', {}, 'Community Insights'),
       h('nav', {}, tab('feed', 'Feed'), tab('monitor', 'Monitoring'), tab('debug', 'Detection')),
       statusChip(),
     ),
+    // The dateline. Pure furniture, and the cheapest thing on the page that
+    // says "this is an edition" rather than "this is a CRUD app".
+    h('div', { class: 'dateline' },
+      h('span', {}, today),
+      h('span', { class: 'dateline-mid' }, 'Ranked by rubric, swept hourly'),
+      h('span', {}, edition)),
     h('main', {}, statusStrip(), alertList(), banner(), ...content),
   );
 }
@@ -302,6 +503,51 @@ function rankItem(p, index) {
   );
 }
 
+function leadStory(p) {
+  const body = (p.selftext || '').trim();
+  const dims = Array.isArray(p.dimensions) ? p.dimensions : [];
+
+  return h('article', { class: 'lead' },
+    h('div', { class: 'lead-kicker' },
+      h('span', { class: 'lead-rank' }, 'Lead'),
+      h('span', { class: 'community' }, p.community_display || `r/${p.community_name}`),
+      h('span', { class: 'sep' }, '/'),
+      h('span', {}, `u/${p.author}`),
+      h('span', { class: 'sep' }, '/'),
+      h('span', {}, ago(p.created_utc)),
+    ),
+    h('h3', { class: 'lead-headline' },
+      h('a', { href: p.permalink, target: '_blank', rel: 'noopener noreferrer' }, p.title)),
+    body ? h('p', { class: 'lead-standfirst' },
+      body.slice(0, 340) + (body.length > 340 ? '\u2026' : '')) : null,
+    h('div', { class: 'lead-foot' },
+      h('div', { class: 'metrics' },
+        h('span', {}, h('b', {}, num(p.score)), ' points'),
+        h('span', {}, h('b', {}, num(p.num_comments)), ' comments'),
+        p.upvote_ratio
+          ? h('span', {}, h('b', {}, `${Math.round(p.upvote_ratio * 100)}%`), ' upvoted')
+          : null,
+      ),
+      p.ai_score !== null && p.ai_score !== undefined
+        ? h('div', { class: 'lead-verdict' },
+            h('span', { class: 'lead-score' }, p.ai_score),
+            h('div', {},
+              p.ai_verdict ? h('div', { class: 'verdict-label' }, p.ai_verdict) : null,
+              h('div', { class: 'verdict-text' }, p.ai_rationale || ''),
+              dims.length ? h('div', { class: 'dims' }, dims.map((d) => h('span', { class: 'dim' },
+                d.name, ' ', h('b', {}, d.score),
+                h('span', { class: 'dim-bar' },
+                  h('span', { style: `width: ${Math.max(0, Math.min(10, d.score)) * 10}%` })),
+              ))) : null),
+          )
+        : h('div', { class: 'lead-verdict pending' },
+            h('span', { class: 'verdict-label' }, 'awaiting ranking'),
+            h('span', { class: 'verdict-text' },
+              'Not yet judged against the current rubric.')),
+    ),
+  );
+}
+
 function feedView() {
   const container = h('div', {});
   const mount = h('div', {}, loading());
@@ -349,9 +595,17 @@ function feedView() {
       h('span', { class: 'muted' }, `${num(data.total)} posts`),
     );
 
+    // Page one gets a lead story: the top-ranked post set large, the way a
+    // front page leads. Later pages do not - a "lead" on page 4 is just a
+    // randomly enlarged row.
+    const lead = page === 1 && data.posts.length ? data.posts[0] : null;
+    const rest = lead ? data.posts.slice(1) : data.posts;
+
     const list = data.posts.length
-      ? h('div', { class: 'rank-list' },
-          data.posts.map((p, i) => rankItem(p, data.rank_offset + i + 1)))
+      ? h('div', {},
+          lead ? leadStory(lead) : null,
+          h('div', { class: 'rank-list' },
+            rest.map((p, i) => rankItem(p, data.rank_offset + i + (lead ? 2 : 1)))))
       : h('div', { class: 'card empty' }, 'No posts match those filters.');
 
     const pager = h('div', { class: 'pager' },
@@ -372,13 +626,118 @@ function feedView() {
   return container;
 }
 
+// The intake panel: volume over time, where it came from, and the headline
+// figures beside it. Three encodings, each chosen for its own data's job -
+// magnitude over time, magnitude across nominal categories, single values.
+function intakePanel(insights) {
+  if (!insights) return null;
+
+  const discovery = insights.discovery || [];
+  const total = discovery.reduce((sum, d) => sum + d.posts, 0);
+  const busiest = discovery.reduce((a, b) => (b.posts > a.posts ? b : a),
+    { bucket: '', posts: 0 });
+
+  // The server picks the granularity from how much history exists, so the
+  // labels have to follow it rather than assume days.
+  const hourly = insights.granularity === 'hour';
+  const fmt = (b) => (hourly ? `${String(b).slice(11)}:00` : shortDay(b));
+  const spanLabel = hourly ? 'last 48 hours' : `last ${insights.days} days`;
+
+  const communities = (insights.communities || []).slice(0, 6).map((c) => ({
+    label: c.display_name || `r/${c.name}`,
+    posts: c.posts,
+  }));
+
+  return [
+    h('h2', {}, `Intake · ${spanLabel}`),
+    h('div', { class: 'panel-grid' },
+      h('div', { class: 'card panel' },
+        h('div', { class: 'panel-head' },
+          h('span', {}, hourly ? 'Posts discovered per hour' : 'Posts discovered per day'),
+          h('span', { class: 'muted' }, `${num(total)} total`)),
+        columnChart(discovery.map((d) => ({ ...d, label: fmt(d.bucket) })), {
+          labelKey: 'label', valueKey: 'posts', tickEvery: hourly ? 6 : 3,
+          tip: (r) => `<b>${num(r.posts)}</b> posts<br>${fmt(r.bucket)}`,
+        })),
+      h('div', { class: 'card panel' },
+        h('div', { class: 'panel-head' },
+          h('span', {}, 'Where they came from'),
+          h('span', { class: 'muted' }, 'all time')),
+        // Nominal categories: every bar the same colour. Shading these by
+        // value would encode length twice and say nothing new.
+        barRows(communities, { labelKey: 'label', valueKey: 'posts' })),
+      h('div', { class: 'card panel figures' },
+        statTile(hourly ? 'Busiest hour' : 'Busiest day', num(busiest.posts),
+          busiest.bucket ? fmt(busiest.bucket) : '\u2014'),
+        statTile(hourly ? 'Hourly average' : 'Daily average',
+          num(Math.round(total / Math.max(1, discovery.length))), 'posts discovered'),
+        statTile('Communities', num((insights.communities || []).length), 'on the watchlist'),
+      ),
+    ),
+  ];
+}
+
+// The score histogram lives with the rubric, because it answers the question
+// the rubric raises: does this thing actually discriminate, or is everything
+// a 70? Ordered buckets, so the one-hue ramp is the right encoding here.
+function scorePanel(insights, scoringData) {
+  const buckets = (insights && insights.scores) || [];
+  const scored = buckets.reduce((sum, b) => sum + b.posts, 0);
+  const spend = (insights && insights.spend) || {};
+
+  // Before anything is scored, plot Reddit's own distribution instead - and
+  // say so in the heading. An empty panel teaches nothing; a panel that
+  // quietly passes Reddit's numbers off as the rubric's would be worse than
+  // empty, so the label does the work.
+  if (!scored) {
+    const reddit = (insights && insights.reddit_scores) || [];
+    const counted = reddit.reduce((sum, b) => sum + b.posts, 0);
+
+    return h('div', { class: 'card panel' },
+      h('div', { class: 'panel-head' },
+        h('span', {}, 'Reddit score distribution'),
+        h('span', { class: 'muted' }, `${num(counted)} posts`)),
+      counted
+        ? columnChart(reddit, {
+            labelKey: 'label', valueKey: 'posts', ramp: true, tickEvery: 1,
+            height: 124,
+            tip: (r) => `<b>${num(r.posts)}</b> posts scored ${r.label} on Reddit`,
+          })
+        : h('div', { class: 'empty' }, 'No posts collected yet.'),
+      h('div', { class: 'panel-foot' },
+        h('span', {}, scoringData && scoringData.enabled
+          ? 'The rubric’s own distribution replaces this once a scoring pass runs.'
+          : 'Scoring is off — turn it on to rank these by the rubric instead.')));
+  }
+
+  const cached = spend.cached_tokens || 0;
+  const billed = spend.input_tokens || 0;
+
+  return h('div', { class: 'card panel' },
+    h('div', { class: 'panel-head' },
+      h('span', {}, 'Score distribution'),
+      h('span', { class: 'muted' }, `${num(scored)} judged`)),
+    columnChart(buckets.map((b) => ({ ...b, label: b.label })), {
+      labelKey: 'label', valueKey: 'posts', ramp: true, tickEvery: 1, height: 124,
+      tip: (r) => `<b>${num(r.posts)}</b> posts scored ${r.label}`,
+    }),
+    h('div', { class: 'panel-foot' },
+      h('span', {}, 'mean ', h('b', {}, (spend.mean_score || 0).toFixed(1))),
+      h('span', {}, 'input ', h('b', {}, num(billed)), ' tok'),
+      h('span', {}, 'output ', h('b', {}, num(spend.output_tokens)), ' tok'),
+      // The saving is the whole argument for scoring in passes, so it is
+      // reported rather than folded into the total.
+      h('span', {}, 'from cache ', h('b', {}, num(cached)), ' tok'),
+    ));
+}
+
 // ------------------------------------------------------------ the rubric
 
 // The editor for how posts are ranked. Saving publishes a new rubric version
 // rather than editing the current one, which is why the button says how many
 // posts it is about to invalidate: under a new rubric every existing score
 // stops applying, and the whole archive has to be judged again.
-function rubricSection(data) {
+function rubricSection(data, insights) {
   if (!data) return null;
 
   const prompt = data.prompt;
@@ -491,7 +850,9 @@ function rubricSection(data) {
 
   return [
     h('h2', {}, 'How posts are ranked'),
-    h('div', { class: 'card' }, coverage, form),
+    h('div', { class: 'rubric-grid' },
+      h('div', { class: 'card' }, coverage, form),
+      scorePanel(insights, data)),
     history ? h('h2', {}, 'Earlier rubrics') : null,
     history ? h('div', { class: 'card' }, history) : null,
   ];
@@ -505,9 +866,11 @@ function monitorView() {
   container.append(mount);
 
   guard(async () => {
-    const [communityData, runData, discoveryData, scoringData] = await Promise.all([
-      api.communities(), api.runs(), api.discoveries(), api.scoring(),
-    ]);
+    const [communityData, runData, discoveryData, scoringData, insights] =
+      await Promise.all([
+        api.communities(), api.runs(), api.discoveries(), api.scoring(),
+        api.insights(14),
+      ]);
 
     const addForm = h('form', {
       class: 'add-form',
@@ -549,6 +912,9 @@ function monitorView() {
         + ` Backend: ${runData.default_backend}.`),
     );
 
+    const dailyByName = Object.fromEntries(
+      (insights.communities || []).map((c) => [c.name, c.daily]));
+
     const communityRows = communityData.communities.map((c) => h('tr', {},
       h('td', {},
         h('strong', {}, c.display_name || `r/${c.name}`),
@@ -560,6 +926,8 @@ function monitorView() {
       h('td', { class: 'nowrap' }, `${c.monitor_sort || 'new'} · ${c.monitor_limit || 50}`),
       h('td', { class: 'num' }, num(c.post_count)),
       h('td', { class: 'num' }, num(c.new_24h)),
+      h('td', { class: 'spark-cell' },
+        dailyByName[c.name] ? sparkline(dailyByName[c.name]) : null),
       h('td', {},
         c.last_status
           ? h('span', {},
@@ -592,10 +960,11 @@ function monitorView() {
       h('thead', {}, h('tr', {},
         h('th', {}, 'Community'), h('th', {}, 'Status'), h('th', {}, 'Watching'),
         h('th', { class: 'num' }, 'Posts'), h('th', { class: 'num' }, 'New 24h'),
+        h('th', {}, '14 days'),
         h('th', {}, 'Last result'), h('th', {}, 'Last checked'), h('th', {}, ''),
       )),
       h('tbody', {}, communityRows.length ? communityRows : h('tr', {}, h('td', {
-        colspan: '8', class: 'empty',
+        colspan: '9', class: 'empty',
       }, 'Nothing monitored yet. Add a subreddit above.'))),
     );
 
@@ -707,7 +1076,8 @@ function monitorView() {
     );
 
     mount.replaceChildren(
-      ...(rubricSection(scoringData) || []).filter(Boolean),
+      ...(intakePanel(insights) || []).filter(Boolean),
+      ...(rubricSection(scoringData, insights) || []).filter(Boolean),
       h('h2', {}, 'Add a community'),
       h('div', { class: 'card' }, addForm),
       h('h2', {}, 'Monitored communities'),
@@ -778,7 +1148,9 @@ function debugView() {
   }
 
   guard(async () => {
-    const data = await api.debugSessions();
+    const [data, insights] = await Promise.all([
+      api.debugSessions(), api.insights(14),
+    ]);
 
     const rows = data.sessions.map((s) => h('tr', {},
       h('td', {}, h('a', { href: `#debug/${s.id}` }, `#${s.id}`)),
@@ -793,10 +1165,31 @@ function debugView() {
       h('td', { class: 'muted nowrap' }, ago(s.created_at)),
     ));
 
+    const t = insights.detection || {};
+
     mount.replaceChildren(
       h('p', { class: 'muted' },
         'Unauthenticated by design — this is a lab target. These views are '
         + 'excluded from RequestLog, so inspecting the log does not write to it.'),
+      h('div', { class: 'panel-grid detection-grid' },
+        h('div', { class: 'card panel' },
+          h('div', { class: 'panel-head' },
+            h('span', {}, 'Requests per hour'),
+            h('span', { class: 'muted' }, `${num(t.requests_1h)} in the last hour`)),
+          columnChart((insights.requests || []).map((r) => ({
+            ...r, label: r.hour.slice(11) + ':00',
+          })), {
+            labelKey: 'label', valueKey: 'hits', tickEvery: 4, height: 124,
+            tip: (r) => `<b>${num(r.hits)}</b> requests<br>${r.hour.slice(11)}:00 UTC`,
+          })),
+        h('div', { class: 'card panel figures' },
+          statTile('Sessions', num(t.sessions), 'seen all time'),
+          statTile('Requests', num(t.requests), 'logged'),
+          statTile('Signals', num(t.signals),
+            t.signals ? 'scored' : 'nothing scoring yet'),
+        ),
+      ),
+      h('h2', {}, 'Sessions'),
       h('div', { class: 'card' }, h('table', {},
         h('thead', {}, h('tr', {},
           h('th', {}, 'Session'), h('th', {}, 'User'), h('th', {}, 'IP'),
