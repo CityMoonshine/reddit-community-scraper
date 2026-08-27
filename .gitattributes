@@ -1,0 +1,10 @@
+# Anything that runs inside a Linux container must keep LF endings regardless
+# of the checkout platform. With core.autocrlf=true on Windows, a fresh clone
+# would otherwise rewrite these to CRLF, and the container fails at the shebang
+# with "bad interpreter: /usr/bin/env bash^M".
+*.sh            text eol=lf
+Dockerfile      text eol=lf
+*.Dockerfile    text eol=lf
+*.conf          text eol=lf
+*.yml           text eol=lf
+*.yaml          text eol=lf

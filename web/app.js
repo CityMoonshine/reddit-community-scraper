@@ -1,12 +1,11 @@
 // The SPA. Hash routing, no build step, no framework - the whole UI is tables
 // and forms, and a toolchain would cost more than it returns here.
 
-import { api, ApiError } from '/api.js';
+import { api } from '/api.js';
 
 const root = document.getElementById('root');
 
 const state = {
-  user: null,
   route: 'feed',
   routeArg: null,
   banner: null,
@@ -80,39 +79,8 @@ async function guard(fn) {
   try {
     await fn();
   } catch (error) {
-    if (error instanceof ApiError && error.status === 401) {
-      state.user = null;
-      render();
-      return;
-    }
     setBanner('error', error.message);
   }
-}
-
-// ------------------------------------------------------------------ login
-
-function loginView() {
-  const form = h('form', {
-    class: 'login-card',
-    onsubmit: (event) => {
-      event.preventDefault();
-      const data = new FormData(form);
-      guard(async () => {
-        state.user = await api.login(data.get('username'), data.get('password'));
-        state.banner = null;
-        render();
-      });
-    },
-  },
-    h('h1', {}, 'Insights Portal'),
-    h('p', { class: 'muted' }, 'Sign in to view monitored communities.'),
-    state.banner && h('div', { class: `banner ${state.banner.kind}` }, state.banner.text),
-    h('label', {}, 'Username', h('input', { name: 'username', required: 'required', autocomplete: 'username' })),
-    h('label', {}, 'Password', h('input', { name: 'password', type: 'password', required: 'required', autocomplete: 'current-password' })),
-    h('button', { class: 'primary', type: 'submit' }, 'Sign in'),
-  );
-
-  return h('div', { class: 'login-wrap' }, form);
 }
 
 // ------------------------------------------------------------------ shell
@@ -125,19 +93,8 @@ function shell(...content) {
 
   return h('div', {},
     h('header', {},
-      h('h1', {}, `${state.user.agency_name} — Insights`),
+      h('h1', {}, 'Community Insights'),
       h('nav', {}, tab('feed', 'Feed'), tab('monitor', 'Monitoring'), tab('debug', 'Detection')),
-      h('form', {
-        onsubmit: (event) => {
-          event.preventDefault();
-          guard(async () => {
-            await api.logout();
-            state.user = null;
-            state.banner = null;
-            render();
-          });
-        },
-      }, h('button', { type: 'submit' }, `Sign out (${state.user.username})`)),
     ),
     h('main', {}, banner(), ...content),
   );
@@ -483,10 +440,6 @@ function readHash() {
 }
 
 function render() {
-  if (!state.user) {
-    root.replaceChildren(loginView());
-    return;
-  }
   root.replaceChildren(shell(VIEWS[state.route]()));
 }
 
@@ -496,18 +449,7 @@ window.addEventListener('hashchange', () => {
   render();
 });
 
-(async function boot() {
+(function boot() {
   readHash();
-
-  try {
-    state.user = await api.me();
-  } catch (error) {
-    // 401 just means "show the login screen"; anything else is worth saying.
-    if (!(error instanceof ApiError && error.status === 401)) {
-      state.banner = { kind: 'error', text: `Cannot reach the API: ${error.message}` };
-    }
-    state.user = null;
-  }
-
   render();
 })();

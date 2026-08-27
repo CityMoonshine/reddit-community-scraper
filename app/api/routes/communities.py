@@ -1,12 +1,11 @@
-"""Managing the monitored set - add, pause, remove."""
+"""Managing the monitored set - add, pause, remove. Open, no login."""
 
 import re
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from app.api.auth import require_session
 from app.db import connection_scope
 
 router = APIRouter(prefix='/api')
@@ -38,7 +37,7 @@ class CommunityRef(BaseModel):
 
 
 @router.get('/communities')
-def list_communities(session=Depends(require_session)):
+def list_communities():
     with connection_scope() as connection:
         rows = connection.execute(
             '''
@@ -51,19 +50,16 @@ def list_communities(session=Depends(require_session)):
                 (SELECT MAX(p.first_seen_at) FROM Posts p
                   WHERE p.community_id = c.id) AS newest_at
             FROM Communities c
-            JOIN Watchlist w ON w.community_id = c.id
-            WHERE w.user_id = ?
             ORDER BY c.monitor_enabled DESC, c.name COLLATE NOCASE;
-            ''',
-            (session['user_id'],),
+            '''
         ).fetchall()
 
     return {'communities': [dict(row) for row in rows]}
 
 
 @router.post('/communities')
-def add_community(body: AddBody, session=Depends(require_session)):
-    """Add a subreddit to the monitored set and this user's watchlist.
+def add_community(body: AddBody):
+    """Add a subreddit to the monitored set.
 
     The row is created empty - the next sweep fills in metadata and posts. That
     keeps the request fast instead of blocking it on a multi-minute browse, and
@@ -86,66 +82,59 @@ def add_community(body: AddBody, session=Depends(require_session)):
         cursor.execute(
             '''
             INSERT INTO Communities (name, display_name, monitor_enabled,
-                                     monitor_sort, monitor_limit, added_by_user_id)
-            VALUES (?, ?, 1, ?, ?, ?)
+                                     monitor_sort, monitor_limit)
+            VALUES (?, ?, 1, ?, ?)
             ON CONFLICT(name) DO UPDATE SET
                 monitor_enabled = 1,
                 monitor_sort = excluded.monitor_sort,
                 monitor_limit = excluded.monitor_limit;
             ''',
-            (cleaned, 'r/' + cleaned, monitor_sort, monitor_limit, session['user_id']),
+            (cleaned, 'r/' + cleaned, monitor_sort, monitor_limit),
         )
 
         community_id = cursor.execute(
             'SELECT id FROM Communities WHERE name = ?;', (cleaned,)
         ).fetchone()['id']
 
-        cursor.execute(
-            'INSERT OR IGNORE INTO Watchlist (user_id, community_id) VALUES (?, ?);',
-            (session['user_id'], community_id),
-        )
-
     return {'name': cleaned, 'community_id': community_id,
             'detail': f'Monitoring r/{cleaned}. It fills in on the next sweep.'}
 
 
 @router.post('/communities/toggle')
-def toggle_community(body: CommunityRef, session=Depends(require_session)):
+def toggle_community(body: CommunityRef):
     with connection_scope() as connection:
-        # Scoped to the caller's own watchlist, so an id from somewhere else
-        # can't be toggled by guessing at it.
         connection.execute(
             '''
             UPDATE Communities
             SET monitor_enabled = CASE WHEN monitor_enabled = 1 THEN 0 ELSE 1 END
-            WHERE id = ? AND id IN (
-                SELECT community_id FROM Watchlist WHERE user_id = ?
-            );
+            WHERE id = ?;
             ''',
-            (body.community_id, session['user_id']),
+            (body.community_id,),
         )
 
     return {'ok': True}
 
 
 @router.post('/communities/remove')
-def remove_community(body: CommunityRef, session=Depends(require_session)):
-    """Drop it from this user's watchlist. Posts already collected stay."""
+def remove_community(body: CommunityRef):
+    """Stop monitoring and drop the community.
+
+    Posts are deleted with it - they reference the community by foreign key,
+    and leaving them orphaned would show rows in the feed for a subreddit the
+    dashboard no longer lists.
+    """
     with connection_scope() as connection:
         connection.execute(
-            'DELETE FROM Watchlist WHERE user_id = ? AND community_id = ?;',
-            (session['user_id'], body.community_id),
+            'DELETE FROM Watchlist WHERE community_id = ?;', (body.community_id,)
         )
-
-        # Nobody watching it means there is nothing to sweep for.
         connection.execute(
-            '''
-            UPDATE Communities SET monitor_enabled = 0
-            WHERE id = ? AND NOT EXISTS (
-                SELECT 1 FROM Watchlist WHERE community_id = ?
-            );
-            ''',
-            (body.community_id, body.community_id),
+            'DELETE FROM Posts WHERE community_id = ?;', (body.community_id,)
+        )
+        connection.execute(
+            'DELETE FROM MonitorRunItems WHERE community_id = ?;', (body.community_id,)
+        )
+        connection.execute(
+            'DELETE FROM Communities WHERE id = ?;', (body.community_id,)
         )
 
     return {'ok': True}

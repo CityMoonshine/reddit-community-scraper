@@ -1,8 +1,12 @@
-"""The feed - what /records used to render server-side."""
+"""The feed.
 
-from fastapi import APIRouter, Depends, Query
+Open, and unfiltered by account: every post from every community is visible.
+The Watchlist table still exists (the seeder and older data reference it) but
+nothing here joins against it any more.
+"""
 
-from app.api.auth import require_session
+from fastapi import APIRouter, Query
+
 from app.db import connection_scope
 
 router = APIRouter(prefix='/api')
@@ -19,17 +23,14 @@ ORDERINGS = {
 
 @router.get('/posts')
 def list_posts(
-    session=Depends(require_session),
     community: str = '',
     flair: str = '',
     sort: str = 'score',
     page: int = Query(1, ge=1),
     per_page: int = Query(25, ge=1, le=200),
 ):
-    # Posts are gated by the watchlist, not by a column on the row itself - an
-    # account sees a subreddit's posts only while it watches that subreddit.
-    where = ['w.user_id = ?']
-    params = [session['user_id']]
+    where = ['1=1']
+    params = []
 
     if community:
         where.append('c.name = ?')
@@ -47,7 +48,6 @@ def list_posts(
             f'''
             SELECT COUNT(*) FROM Posts p
             JOIN Communities c ON c.id = p.community_id
-            JOIN Watchlist w ON w.community_id = c.id
             WHERE {clause};
             ''',
             params,
@@ -58,7 +58,6 @@ def list_posts(
             SELECT p.*, c.name AS community_name, c.display_name AS community_display
             FROM Posts p
             JOIN Communities c ON c.id = p.community_id
-            JOIN Watchlist w ON w.community_id = c.id
             WHERE {clause}
             ORDER BY {ordering}
             LIMIT ? OFFSET ?;
@@ -69,13 +68,10 @@ def list_posts(
         flairs = [
             row['flair'] for row in connection.execute(
                 '''
-                SELECT DISTINCT p.flair
-                FROM Posts p
-                JOIN Watchlist w ON w.community_id = p.community_id
-                WHERE w.user_id = ? AND p.flair IS NOT NULL AND p.flair != ''
-                ORDER BY p.flair;
-                ''',
-                (session['user_id'],),
+                SELECT DISTINCT flair FROM Posts
+                WHERE flair IS NOT NULL AND flair != ''
+                ORDER BY flair;
+                '''
             ).fetchall()
         ]
 

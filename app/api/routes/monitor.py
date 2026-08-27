@@ -1,10 +1,9 @@
 """Sweep history and the "Run sweep now" trigger."""
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from app.api.auth import require_session
 from app.config import SCRAPE_BACKEND, SWEEP_INTERVAL_MINUTES
 from app.db import connection_scope
 
@@ -16,7 +15,7 @@ class RunBody(BaseModel):
 
 
 @router.get('/runs')
-def list_runs(session=Depends(require_session), limit: int = Query(10, ge=1, le=100)):
+def list_runs(limit: int = Query(10, ge=1, le=100)):
     with connection_scope() as connection:
         runs = connection.execute(
             '''
@@ -47,7 +46,7 @@ def list_runs(session=Depends(require_session), limit: int = Query(10, ge=1, le=
 
 
 @router.get('/runs/{run_id}')
-def run_detail(run_id: int, session=Depends(require_session)):
+def run_detail(run_id: int):
     with connection_scope() as connection:
         run = connection.execute(
             'SELECT * FROM MonitorRuns WHERE id = ?;', (run_id,)
@@ -64,7 +63,7 @@ def run_detail(run_id: int, session=Depends(require_session)):
 
 
 @router.get('/discoveries')
-def discoveries(session=Depends(require_session), limit: int = Query(25, ge=1, le=200)):
+def discoveries(limit: int = Query(25, ge=1, le=200)):
     """The point of the hourly sweep: what showed up that wasn't there before."""
     with connection_scope() as connection:
         rows = connection.execute(
@@ -72,19 +71,18 @@ def discoveries(session=Depends(require_session), limit: int = Query(25, ge=1, l
             SELECT p.*, c.name AS community_name, c.display_name AS community_display
             FROM Posts p
             JOIN Communities c ON c.id = p.community_id
-            JOIN Watchlist w ON w.community_id = c.id
-            WHERE w.user_id = ? AND p.first_seen_at IS NOT NULL
+            WHERE p.first_seen_at IS NOT NULL
             ORDER BY p.first_seen_at DESC, p.score DESC
             LIMIT ?;
             ''',
-            (session['user_id'], limit),
+            (limit,),
         ).fetchall()
 
     return {'discoveries': [dict(row) for row in rows]}
 
 
 @router.post('/runs')
-def queue_run(body: RunBody, session=Depends(require_session)):
+def queue_run(body: RunBody):
     """Ask the worker for an out-of-band sweep.
 
     This container has no Chromium and no Xvfb, so it cannot run the sweep
